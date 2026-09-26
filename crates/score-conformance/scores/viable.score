@@ -1,0 +1,13 @@
+// Enforcement without deadlock (Proposition 6.3 of the note).
+// The machine can wander into E4 and stay there; the rule forbids three equal
+// pitches in a row, so once in E4 the voice is stuck. The viability factor
+// keeps it out of E4 for good.
+import std
+pitches { C4, D4, E4, r }
+durations { q = 1/4 }
+timbres { piano = gm(0) on 1 }
+factor style = machine pitch { C4 -> C4 @ 1, C4 -> D4 @ 1, D4 -> C4 @ 1, C4 -> E4 @ 1, E4 -> E4 @ 1 }
+factor rhythm = machine dur uniform
+factor rule = [!(any t in pitches { back(0, t) && back(1, t) && carry(t) })]
+factor viable = [leads(nu X. <!(any t in pitches { back(0, t) && back(1, t) && carry(t) })> X)]
+play Voice(piano, style * rhythm * rule * viable, C4, q, "A") #A

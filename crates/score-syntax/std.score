@@ -1,0 +1,141 @@
+// std.score -- the standard library of the f1r3score player.
+//
+// Everything here is written in the surface syntax and elaborates to terms of
+// the core calculus; the engine knows nothing of it (R-neutral). Section and
+// definition numbers refer to "Scores as Processes" (publications/f1r3score).
+// The pitch `r` (the rest) and the duration `eps` (the null duration) are
+// resolved against the importing score's alphabets.
+
+// ---------------------------------------------------------------- written notes
+
+// A written note (Section 2.5): a hand on the channel for p and a message on
+// the co-channel for d, both at L. They meet by COMM1 and emit (tau, p, d).
+def N(L: proc, tau: timbre, p: pitch, d: dur; K: proc) =
+  for (_ <- <@L, tau, p>) { K } | <@L, tau, d>!(0, tau, r)
+
+// `line(L, tau) [ p d, ... ] then K` is a derived form of the parser that
+// elaborates to a right-nested chain of N.
+
+// ------------------------------------------------------------------ the step
+
+// Record, fan, seed (Definition 5.1). Only the location of x is used.
+def Rec(x: name, tau: timbre, v: dur, t: pitch) = <@*x, tau, v>!(*x, tau, t)
+
+def Fan(x: name, tau: timbre) =
+  par v in durations+, t in pitches {
+    <@*x, tau, v>!(Rec(x, tau, v, t), tau, t)
+  }
+
+// H0: a virtual note before the first; u0 plays the previous duration and p0
+// is the first pitch.
+def Seed(B: proc, tau: timbre, p0: pitch, u0: dur) = <@B, tau, u0>!(B, tau, p0)
+
+// Step (Definition 5.2): every hand is offered and the clause keeps the one
+// holding the recorded pitch live.
+def Step(w: name, tau: timbre, psi: clause, K: cont) =
+  par t in pitches {
+    for (z <- <@*w, tau, t> where psi * [held(t)]) { K(z) }
+  }
+  | Fan(w, tau)
+
+// ------------------------------------------------ unbounded voices, reflectively
+
+// Section 4.2: the continuation asks for the next step; a server answers from
+// its own code, kept on a code channel and re-sent each time it is read. No
+// definition mentions itself.
+def Req(z: name, tau: timbre, BS: proc) = <@BS, tau, eps>!(*z, tau, r)
+
+def Refresh(tau: timbre, BC: proc) =
+  for (c <- <@BC, tau, r>) { *c | <@BC, tau, eps>!(*c, tau, r) }
+
+// A server whose live hand asks the server at BN for the next step. With
+// BN = BS it is the voice's own server; with another player's base it is one
+// half of a hocket.
+def ServerTo(tau: timbre, psi: clause, BS: proc, BC: proc, BN: proc) =
+  for (w <- <@BS, tau, r>) {
+    Step(w, tau, psi, Req(_, tau, BN)) | Refresh(tau, BC)
+  }
+
+def Server(tau: timbre, psi: clause, BS: proc, BC: proc) = ServerTo(tau, psi, BS, BC, BS)
+
+// The reflective voice (Proposition 4.4): a server, its code on the code
+// channel, and a request carrying the seed. Bases are tag/S, tag/C and tag.
+def Voice(tau: timbre, psi: clause, p0: pitch, u0: dur, tag: string) =
+  Server(tau, psi, base tag ++ "/S", base tag ++ "/C")
+  | <@(base tag ++ "/C"), tau, eps>!(Server(tau, psi, base tag ++ "/S", base tag ++ "/C"), tau, r)
+  | <@(base tag ++ "/S"), tau, eps>!(Seed(base tag, tau, p0, u0), tau, r)
+
+// ------------------------------------------------------ the dual: rhythm leads
+
+// Hands on duration co-channels, fan of pitch channels (COMM2): the duration
+// is chosen a note early and carried. Clauses read prev/pitch for pitch and
+// dur/carry for duration (machine pitch dual, machine dur dual).
+def DualRec(x: name, tau: timbre, t: pitch, v: dur) = <@*x, tau, t>!(*x, tau, v)
+
+def DualFan(x: name, tau: timbre) =
+  par t in pitches, v in durations+ {
+    <@*x, tau, t>!(DualRec(x, tau, t, v), tau, v)
+  }
+
+def DualSeed(B: proc, tau: timbre, p0: pitch, u0: dur) = <@B, tau, p0>!(B, tau, u0)
+
+def DualStep(w: name, tau: timbre, psi: clause, K: cont) =
+  par v in durations+ {
+    for (z <- <@*w, tau, v> where psi * [held(v)]) { K(z) }
+  }
+  | DualFan(w, tau)
+
+def DualServer(tau: timbre, psi: clause, BS: proc, BC: proc) =
+  for (w <- <@BS, tau, r>) {
+    DualStep(w, tau, psi, Req(_, tau, BS)) | Refresh(tau, BC)
+  }
+
+def DualVoice(tau: timbre, psi: clause, p0: pitch, u0: dur, tag: string) =
+  DualServer(tau, psi, base tag ++ "/S", base tag ++ "/C")
+  | <@(base tag ++ "/C"), tau, eps>!(DualServer(tau, psi, base tag ++ "/S", base tag ++ "/C"), tau, r)
+  | <@(base tag ++ "/S"), tau, eps>!(DualSeed(base tag, tau, p0, u0), tau, r)
+
+// ------------------------------------------------------------ alternation
+
+// Hocket (Section 6.5): two players share a timbre and a line; each player's
+// live hand asks the OTHER player's server for the next step, so their notes
+// interleave note for note while each clause adds its player's preferences.
+def HocketA(tau: timbre, psiA: clause, tag: string) =
+  ServerTo(tau, psiA, base tag ++ "/A/S", base tag ++ "/A/C", base tag ++ "/B/S")
+  | <@(base tag ++ "/A/C"), tau, eps>!(
+      ServerTo(tau, psiA, base tag ++ "/A/S", base tag ++ "/A/C", base tag ++ "/B/S"), tau, r)
+
+def HocketB(tau: timbre, psiB: clause, tag: string) =
+  ServerTo(tau, psiB, base tag ++ "/B/S", base tag ++ "/B/C", base tag ++ "/A/S")
+  | <@(base tag ++ "/B/C"), tau, eps>!(
+      ServerTo(tau, psiB, base tag ++ "/B/S", base tag ++ "/B/C", base tag ++ "/A/S"), tau, r)
+
+// Both players, with player A playing first from the seed.
+def Hocket(tau: timbre, psiA: clause, psiB: clause, p0: pitch, u0: dur, tag: string) =
+  HocketA(tau, psiA, tag) | HocketB(tau, psiB, tag)
+  | <@(base tag ++ "/A/S"), tau, eps>!(Seed(base tag, tau, p0, u0), tau, r)
+
+// ---------------------------------------------------------------- handoff
+
+// Call and response (Proposition 6.5). The caller's last live hand continues
+// with Call instead of a request: the fan is emitted at the rendezvous R in
+// the responder's timbre, and its records carry the caller's whole history.
+def Call(x: name, tauB: timbre, R: proc) =
+  par v in durations+, t in pitches {
+    <@R, tauB, v>!(Rec(x, tauB, v, t), tauB, t)
+  }
+
+// The responder waits at R holding its written first pitch pB; its clause
+// psiB chooses among the Call messages, and its request asks its own server.
+def Resp(R: proc, tauB: timbre, pB: pitch, psiB: clause, BS: proc) =
+  for (y <- <@R, tauB, pB> where psiB) { Req(y, tauB, BS) }
+
+// A complete responder: Resp plus its own reflective server and code. The
+// first fitting happens at the rendezvous, whose location is a base: its
+// clause psiFirst reads the call through passes(...) (Proposition 6.5); from
+// then on the responder's location holds the call as a sub-record and psiB
+// reads it with at(...), last[...] or call[...].
+def Responder(R: proc, tauB: timbre, pB: pitch, psiFirst: clause, psiB: clause, tag: string) =
+  Resp(R, tauB, pB, psiFirst, base tag ++ "/S")
+  | Server(tauB, psiB, base tag ++ "/S", base tag ++ "/C")
+  | <@(base tag ++ "/C"), tauB, eps>!(Server(tauB, psiB, base tag ++ "/S", base tag ++ "/C"), tauB, r)

@@ -1,0 +1,14 @@
+[package]
+name = "score-conformance"
+description = "The ported skeinsim conformance suite (T0-T12) and golden files for the f1r3score player"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+score-core = { path = "../score-core" }
+score-logic = { path = "../score-logic" }
+score-syntax = { path = "../score-syntax" }
+score-chance = { path = "../score-chance" }
+score-engine = { path = "../score-engine" }
+score-render = { path = "../score-render" }

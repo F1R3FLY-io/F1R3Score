@@ -1,0 +1,13 @@
+// Hocket (Section 6.5): two players share a timbre and one line; each
+// player's live hand asks the other's server for the next step, so the notes
+// alternate A, B, A, B. The interval factor sees every note of the line.
+score Hocket
+import std
+pitches   { r, scale major C4 .. C5 }
+durations { q = 1/4, e = 1/8 }
+timbres   { marimba = gm(12) on 1 }
+factor line   = table step { -2..2: 1, _: 0 }
+factor low    = [!carry(C5) && !carry(B4)]          // player A leaves the top to B
+factor high   = [!carry(C4) && !carry(D4)]          // player B leaves the bottom to A
+factor even   = machine dur uniform
+play Hocket(marimba, line * low * even, line * high * even, E4, q, "H")

@@ -1,0 +1,11 @@
+// T12: the written first phrase of Twinkle, Twinkle, Little Star with a bass
+// line (Section 2.5 of the note; spec, Twinkle in full).
+score Twinkle
+import std
+pitches   { r, C3, F3, G3, C4, D4, E4, F4, G4, A4 }
+durations { q = 1/4, h = 1/2 }
+timbres   { piano = gm(0) on 1, bass = gm(32) on 2 }
+
+play line(base "Lm", piano) [ C4 q, C4 q, G4 q, G4 q, A4 q, A4 q, G4 h,
+                              F4 q, F4 q, E4 q, E4 q, D4 q, D4 q, C4 h ]
+   | line(base "Lb", bass)  [ C3 h, C3 h, F3 h, C3 h, F3 h, C3 h, G3 h, C3 h ]

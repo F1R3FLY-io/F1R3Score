@@ -1,0 +1,12 @@
+[package]
+name = "score-core"
+description = "Data alphabets, hash-consed terms in congruence normal form, substitution, names and locations for the f1r3score player"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+num-bigint.workspace = true
+num-rational.workspace = true
+num-traits.workspace = true
+num-integer.workspace = true

@@ -1,0 +1,4 @@
+/target
+*.mid
+*.jsonl
+!crates/score-conformance/golden/*.mid

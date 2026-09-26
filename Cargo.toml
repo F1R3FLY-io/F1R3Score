@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/score-core",
+    "crates/score-logic",
+    "crates/score-syntax",
+    "crates/score-chance",
+    "crates/score-engine",
+    "crates/score-render",
+    "crates/f1r3score",
+    "crates/score-conformance",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+repository = "https://github.com/F1R3FLY-io/f1r3score"
+
+[workspace.dependencies]
+num-bigint = "0.4"
+num-rational = { version = "0.4", default-features = false, features = ["num-bigint", "std"] }
+num-traits = "0.2"
+num-integer = "0.1"
+
+[profile.test]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1

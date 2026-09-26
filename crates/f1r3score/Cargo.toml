@@ -1,0 +1,18 @@
+[package]
+name = "f1r3score"
+description = "The f1r3score player: reads a textual score and plays a run of it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+score-core = { path = "../score-core" }
+score-logic = { path = "../score-logic" }
+score-syntax = { path = "../score-syntax" }
+score-chance = { path = "../score-chance" }
+score-engine = { path = "../score-engine" }
+score-render = { path = "../score-render" }
+
+[features]
+default = []
+live = ["score-render/live"]

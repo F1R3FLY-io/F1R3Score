@@ -1,0 +1,16 @@
+[package]
+name = "score-chance"
+description = "Chance sources for the f1r3score player: PRNG and spigot digit streams, exact interval decoding, replay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+score-core = { path = "../score-core" }
+num-bigint.workspace = true
+num-traits.workspace = true
+
+[features]
+default = ["spigot"]
+# exact spigot digit streams (pi, e, ln2, liouville, champernowne, thue-morse)
+spigot = []

@@ -1,0 +1,10 @@
+[package]
+name = "score-syntax"
+description = "Lexer, parser, macro elaboration, std.score and pretty-printer for the f1r3score surface syntax"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+score-core = { path = "../score-core" }
+score-logic = { path = "../score-logic" }

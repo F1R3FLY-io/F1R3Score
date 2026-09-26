@@ -1,0 +1,11 @@
+[package]
+name = "score-engine"
+description = "The f1r3score engine: soup, candidates, contention sets, maximal matchings, resolution, time, scheduling, collection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+score-core = { path = "../score-core" }
+score-logic = { path = "../score-logic" }
+score-chance = { path = "../score-chance" }

@@ -1,0 +1,21 @@
+// Call and response (Proposition 6.5). The caller plays three written steps
+// and hands its whole history to the responder at the rendezvous R, in the
+// responder's timbre. The responder's first note is its written G4; its first
+// clause reads the call through passes(...): if the call ended on G4 it
+// answers a fifth up (four scale steps). After that it walks by step, and its
+// location still holds the call as a sub-record.
+score CallResponse
+import std
+pitches   { r, scale major C4 .. C6 }
+durations { q = 1/4, h = 1/2 }
+timbres   { flute = gm(73) on 1, cello = gm(42) on 2 }
+factor calls  = machine pitch { C4 -> E4 @ 1, E4 -> G4 @ 1, G4 -> E4 @ 1 } * machine dur { q -> q @ 1 }
+// the passed record: <next pitch> over <the caller's unplayed pitch> over <its last played note>
+factor ended_on_G4 = [passes(<_,_,_>!(<_,_,_>!(<_,_,_>!(true, _, G4), _, _), _, _))]
+factor answer = ended_on_G4 * [step(4)] * table dur { h: 1, _: 0 }
+factor walk   = table step { -1: 1, 1: 1, _: 0 } * machine dur uniform * [!carry(r)]
+def C3(w: name) = Step(w, flute, calls, Call(_, cello, base "R"))
+def C2(w: name) = Step(w, flute, calls, C3(_))
+def C1(w: name) = Step(w, flute, calls, C2(_))
+play C1(<@Seed(base "caller", flute, C4, q), flute, r>) #call
+   | Responder(base "R", cello, G4, answer, walk, "resp") #resp

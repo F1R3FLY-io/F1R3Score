@@ -1,0 +1,18 @@
+[package]
+name = "score-render"
+description = "Performance and trace serialisation, Standard MIDI File writer and live MIDI for the f1r3score player"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+score-core = { path = "../score-core" }
+score-engine = { path = "../score-engine" }
+score-chance = { path = "../score-chance" }
+num-integer.workspace = true
+num-traits.workspace = true
+midir = { version = "0.9", optional = true }
+
+[features]
+# live MIDI output through midir (needs ALSA headers on Linux)
+live = ["dep:midir"]

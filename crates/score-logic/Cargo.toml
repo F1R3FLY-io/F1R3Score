@@ -1,0 +1,9 @@
+[package]
+name = "score-logic"
+description = "Crisp and graded clause formulae, the checkable fragment, candidate views and evaluation for the f1r3score player"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+score-core = { path = "../score-core" }
