@@ -32,7 +32,7 @@ fn chunk(tag: &[u8; 4], body: &[u8], out: &mut Vec<u8>) {
 pub fn division(notes: &[Note], alph: &Alphabets) -> (u64, bool) {
     let mut l: u64 = 1;
     let q4 = Q::int(4);
-    for n in notes {
+    for n in notes.iter().filter(|n| !n.timbre.is_reserved()) {
         for x in [n.onset.mul(&q4), alph.len(n.dur).mul(&q4)] {
             let d = match &x {
                 Q::S(_, d) => *d,
@@ -83,6 +83,9 @@ pub fn write(notes: &[Note], alph: &Alphabets, bpm: u32) -> Midi {
         }
         // (tick, off-before-on, key, bytes)
         let mut evs: Vec<(u32, u8, u8, [u8; 3])> = vec![];
+        // a note's track is chosen by its timbre -- the meet of the two
+        // subjects' timbres -- so a chimeric key's notes go to whichever
+        // timbre won; the reserved dead and control timbres have no track
         for n in notes.iter().filter(|n| n.timbre.0 as usize == ti) {
             let Some(key) = alph.midi(n.pitch) else { continue }; // rests are silence
             let len = alph.len(n.dur);

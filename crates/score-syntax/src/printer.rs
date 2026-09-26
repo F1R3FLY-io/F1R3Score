@@ -2,7 +2,7 @@
 //! (plus `base "tag"`), such that printing and re-parsing is the identity on
 //! interned terms.
 
-use score_core::base::decode_base;
+use score_core::base::{decode_ackloc, decode_base, decode_keycode, decode_keyloc};
 use score_core::*;
 use score_logic::formula::*;
 use score_logic::ClauseArena;
@@ -83,6 +83,22 @@ impl<'a> Printer<'a> {
             let _ = write!(o, "base \"{}\"", esc(&tag));
             return;
         }
+        if let Some((b, k)) = decode_keyloc(self.arena, p) {
+            o.push_str("keyloc(");
+            self.proc(b, names, o, true);
+            let _ = write!(o, ", {})", self.alph.name(k));
+            return;
+        }
+        if let Some((b, k, t)) = decode_keycode(self.arena, p) {
+            o.push_str("keycode(");
+            self.proc(b, names, o, true);
+            let _ = write!(o, ", {}, {})", self.alph.name(k), self.alph.timbre_name(t));
+            return;
+        }
+        if let Some(n) = decode_ackloc(self.arena, p) {
+            let _ = write!(o, "ackloc({n})");
+            return;
+        }
         match self.arena.get(p) {
             Proc::Nil => o.push('0'),
             Proc::Par(cs) => {
@@ -138,7 +154,11 @@ impl<'a> Printer<'a> {
                 self.name(*subj, names, o);
                 o.push_str("!(");
                 self.proc(*payload, names, o, true);
-                let _ = write!(o, ", {}, {})", self.alph.timbre_name(*ptimbre), self.alph.name(*carry));
+                if ptimbre.is_wild() && carry.is_wild() {
+                    o.push(')');
+                } else {
+                    let _ = write!(o, ", {}, {})", self.hat_t(*ptimbre), self.hat_d(*carry));
+                }
             }
             Proc::Drop(n) => {
                 o.push('*');
@@ -164,8 +184,35 @@ impl<'a> Printer<'a> {
                 o.push_str("<@");
                 let mut names2 = names.to_vec();
                 self.proc(proc, &mut names2, o, false);
-                let _ = write!(o, ", {}, {}>", self.alph.timbre_name(timbre), self.alph.name(datum));
+                let _ = write!(o, ", {}, {}>", self.hat_t(timbre), self.hat_d(datum));
             }
+        }
+    }
+
+    fn hat_t(&self, t: Hat<Timbre>) -> String {
+        match t {
+            Hat::Is(t) => self.alph.timbre_name(t).to_string(),
+            Hat::Wild => "_".into(),
+        }
+    }
+    fn hat_d(&self, d: Hat<Datum>) -> String {
+        match d {
+            Hat::Is(d) => self.alph.name(d).to_string(),
+            Hat::Wild => "_".into(),
+        }
+    }
+    fn pat_t(&self, t: &PatC<Timbre>) -> String {
+        match t {
+            PatC::Any => "?".into(),
+            PatC::Wild => "_".into(),
+            PatC::Is(t) => self.alph.timbre_name(*t).to_string(),
+        }
+    }
+    fn pat_d(&self, d: &PatC<Datum>) -> String {
+        match d {
+            PatC::Any => "?".into(),
+            PatC::Wild => "_".into(),
+            PatC::Is(d) => self.alph.name(*d).to_string(),
         }
     }
 
@@ -273,7 +320,7 @@ impl<'a> Printer<'a> {
         match a {
             Atom::Pitch(s, d) => format!("pitch{}({})", slot(s), self.alph.name(*d)),
             Atom::Dur(s, d) => format!("dur{}({})", slot(s), self.alph.name(*d)),
-            Atom::Carry(s, d) => format!("carry{}({})", slot(s), self.alph.name(*d)),
+            Atom::Carry(s, d) => format!("carry{}({})", slot(s), self.hat_d(*d)),
             Atom::Step(s, k) => format!("step{}({k})", slot(s)),
             Atom::At(sp) => format!("at({})", self.sp(sp)),
             Atom::Passes(s, sp) => format!("passes{}({})", slot(s), self.sp(sp)),
@@ -304,8 +351,8 @@ impl<'a> Printer<'a> {
                 "{}!({}, {}, {})",
                 self.npat(subj),
                 self.sp(payload),
-                ptimbre.map(|t| self.alph.timbre_name(t).to_string()).unwrap_or("_".into()),
-                carry.map(|d| self.alph.name(d).to_string()).unwrap_or("_".into())
+                self.pat_t(ptimbre),
+                self.pat_d(carry)
             ),
             Sp::In { subj, body } => format!("for({}) ({})", self.npat(subj), self.sp(body)),
         }
@@ -314,9 +361,9 @@ impl<'a> Printer<'a> {
     fn npat(&self, n: &NamePat) -> String {
         format!(
             "<{}, {}, {}>",
-            n.quote.as_ref().map(|q| self.sp(q)).unwrap_or("_".into()),
-            n.timbre.map(|t| self.alph.timbre_name(t).to_string()).unwrap_or("_".into()),
-            n.datum.map(|d| self.alph.name(d).to_string()).unwrap_or("_".into())
+            n.quote.as_ref().map(|q| self.sp(q)).unwrap_or("?".into()),
+            self.pat_t(&n.timbre),
+            self.pat_d(&n.datum)
         )
     }
 

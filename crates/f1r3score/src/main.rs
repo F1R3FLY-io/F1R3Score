@@ -19,11 +19,13 @@ usage:
   f1r3score expand SCORE
   f1r3score play   SCORE [options]
   f1r3score replay TRACE --score SCORE [--midi FILE] [--bpm N] [--format table|json]
+  f1r3score render TRACE [--midi FILE] [--bpm N] [--out FILE] [--format table|json] [--include-null]
+                                     playback only: the notes are read off the trace's records
   f1r3score machine import FILE --kind pitch|dur [--dual] --score SCORE [--name NAME]
 
 play options:
   --chance SPEC          default chance source: prng:SEED | spigot:C/B[@POS] | human   (default prng:0)
-  --stream KEY=SPEC      bind a stream key (a label, a timbre, or KEY.pitch / KEY.dur)
+  --stream LABEL=SPEC    bind a stream label (a label, a timbre, or LABEL.pitch / LABEL.dur)
   --scheduler S          canonical | random:SEED | by-timbre:A,B,...                   (default canonical)
   --mode max|one         fire a maximal matching (default) or one candidate (diagnostic)
   --gc off|freshness     collection of inert record locations                          (default off)
@@ -33,6 +35,8 @@ play options:
   --kmax K               interval-decoding digit bound (default 64)
   --trace FILE           JSONL trace (replayable)
   --format table|json    performance on stdout (default table)
+  --out FILE             performance as JSON to FILE
+  --include-null         include null notes (zero length) in the performance, for diagnosis
   --midi FILE  --bpm N   Standard MIDI File (default 120 bpm)
   --live PORT            live MIDI output (built with --features live)
   --quiet                no performance on stdout
@@ -140,20 +144,47 @@ struct Output {
     format: String,
     quiet: bool,
     midi: Option<String>,
+    out: Option<String>,
     bpm: u32,
+    include_null: bool,
 }
 
-fn emit(e: &Engine, s_name: Option<&str>, digest: &str, o: &Output) {
-    let perf = e.sorted_performance();
-    if !o.quiet {
-        if o.format == "json" {
-            println!("{}", render::performance_json(&perf, &e.alph, s_name, digest));
-        } else {
-            print!("{}", render::performance_table(&perf, &e.alph));
+impl Output {
+    fn take(o: &mut Opts) -> Output {
+        Output {
+            format: o.take("--format").unwrap_or_else(|| "table".into()),
+            quiet: o.flag("--quiet"),
+            midi: o.take("--midi"),
+            out: o.take("--out"),
+            bpm: o.num("--bpm").unwrap_or(120),
+            include_null: o.flag("--include-null"),
         }
     }
+}
+
+/// Print and write a performance. `all` holds every note of the run (null
+/// notes included), each computed by playback from a record.
+fn emit_notes(all: &[Note], alph: &score_core::Alphabets, digest: &str, o: &Output) {
+    let perf = render::performance_of(all, alph);
+    let shown: Vec<Note> = if o.include_null {
+        let mut v = all.to_vec();
+        v.sort_by(|x, y| (&x.onset, x.timbre, x.pitch, x.dur).cmp(&(&y.onset, y.timbre, y.pitch, y.dur)));
+        v
+    } else {
+        perf.clone()
+    };
+    if !o.quiet {
+        if o.format == "json" {
+            println!("{}", render::performance_json(&shown, alph, digest));
+        } else {
+            print!("{}", render::performance_table(&shown, alph));
+        }
+    }
+    if let Some(f) = &o.out {
+        std::fs::write(f, render::performance_json(&shown, alph, digest) + "\n").unwrap_or_else(|e| die(3, format!("{f}: {e}")));
+    }
     if let Some(m) = &o.midi {
-        let midi = render::midi::write(&perf, &e.alph, o.bpm);
+        let midi = render::midi::write(&perf, alph, o.bpm);
         if let Some(w) = &midi.warning {
             eprintln!("f1r3score: warning: {w}");
         }
@@ -194,7 +225,6 @@ fn main() {
             };
             let s = load(&score_file);
             let digest = s.digest_hex();
-            let name = s.name.clone();
             let mut cfg = Config::default();
             let mut sources_spec: Vec<String> = vec![];
             let mut chance = "prng:0".to_string();
@@ -253,12 +283,7 @@ fn main() {
                 eprintln!("f1r3score: note: no --notes/--until/--max-steps; an unbounded score will play forever");
             }
             let trace_out = o.take("--trace");
-            let out = Output {
-                format: o.take("--format").unwrap_or_else(|| "table".into()),
-                quiet: o.flag("--quiet"),
-                midi: o.take("--midi"),
-                bpm: o.num("--bpm").unwrap_or(120),
-            };
+            let out = Output::take(&mut o);
             let live = o.take("--live");
             o.done();
             let mut sources = Sources::new(source(&chance, cfg.kmax));
@@ -286,7 +311,9 @@ fn main() {
                 die(1, "this build has no live MIDI; rebuild with `--features live`");
             }
             let mut last_step = None;
+            let mut all_notes: Vec<Note> = vec![];
             let res = e.run(&limits, &mut |ev, eng| {
+                all_notes.extend(ev.notes.iter().cloned());
                 if let Some(w) = tw.as_mut() {
                     writeln!(w, "{}", render::trace_event(ev, &eng.alph)).ok();
                 }
@@ -315,14 +342,23 @@ fn main() {
                             die(4, format!("replay ended ({stop:?}) with {} recorded choices unused", t.recorded.len() - consumed));
                         }
                     }
-                    emit(&e, name.as_deref(), &digest, &out);
+                    emit_notes(&all_notes, &e.alph, &digest, &out);
                     eprintln!("f1r3score: {:?} after {} steps, {} notes", stop, e.steps, e.played);
                 }
                 Err(err) => {
-                    emit(&e, name.as_deref(), &digest, &out);
+                    emit_notes(&all_notes, &e.alph, &digest, &out);
                     die(if err.is_replay_mismatch() { 4 } else { 3 }, err)
                 }
             }
+        }
+        "render" => {
+            let file = args.first().cloned().unwrap_or_else(|| die(1, USAGE));
+            let mut o = Opts { args: args[1..].to_vec() };
+            let out = Output::take(&mut o);
+            o.done();
+            let text = std::fs::read_to_string(&file).unwrap_or_else(|e| die(1, format!("{file}: {e}")));
+            let (alph, digest, notes) = render::render_trace(&text).unwrap_or_else(|e| die(2, e));
+            emit_notes(&notes, &alph, &digest, &out);
         }
         "machine" => {
             if args.first().map(|s| s.as_str()) != Some("import") || args.len() < 2 {

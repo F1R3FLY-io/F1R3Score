@@ -10,7 +10,7 @@ pub struct Id {
     pub span: Span,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Sort {
     Proc,
     Name,
@@ -20,6 +20,13 @@ pub enum Sort {
     Clause,
     Cont,
     Str,
+    /// a finite set of pitches: `{A2, E2}`, `pitches`, `pitches-r`, or a
+    /// declared `pitchset`
+    Pitchset,
+    /// `[S]`: a finite list
+    List(Box<Sort>),
+    /// `(S1, S2, ...)`: a tuple
+    Tuple(Vec<Sort>),
 }
 impl Sort {
     pub fn parse(s: &str) -> Option<Sort> {
@@ -32,11 +39,22 @@ impl Sort {
             "clause" => Sort::Clause,
             "cont" => Sort::Cont,
             "string" => Sort::Str,
+            "pitchset" => Sort::Pitchset,
             _ => return None,
         })
     }
+    pub fn show(&self) -> String {
+        match self {
+            Sort::List(s) => format!("[{}]", s.show()),
+            Sort::Tuple(v) => format!("({})", v.iter().map(|x| x.show()).collect::<Vec<_>>().join(", ")),
+            s => s.as_str().to_string(),
+        }
+    }
     pub fn as_str(&self) -> &'static str {
         match self {
+            Sort::Pitchset => "pitchset",
+            Sort::List(_) => "list",
+            Sort::Tuple(_) => "tuple",
             Sort::Proc => "proc",
             Sort::Name => "name",
             Sort::Timbre => "timbre",
@@ -49,12 +67,30 @@ impl Sort {
     }
 }
 
+/// A decoration component as written: a name, or the wildcard `_`.
+#[derive(Clone, Debug)]
+pub enum DecoId {
+    Id(Id),
+    Wild(Span),
+}
+
 #[derive(Clone, Debug)]
 pub enum PExpr {
     Zero,
     Par(Vec<PExpr>),
     For { label: Option<Id>, binds: Vec<(Option<Id>, NExpr)>, clause: Option<CExpr>, body: Box<PExpr>, span: Span },
-    Send { subj: NExpr, payload: Box<PExpr>, timbre: Id, datum: Id, span: Span },
+    /// `x!(Q, t, d)`, or `x!(Q)` (both decorations `_`, `deco: None`)
+    Send { subj: NExpr, payload: Box<PExpr>, deco: Option<(DecoId, DecoId)>, span: Span },
+    /// synchronous output `step ; rest` (Def. 9.3): the step is one message
+    /// or a parenthesised parallel group of messages
+    Seq { step: Vec<PExpr>, rest: Box<PExpr>, span: Span },
+    /// `keyloc(P, k)`: the key location K_{P,k}
+    KeyLoc { p: Box<PExpr>, k: DecoId, span: Span },
+    /// `keycode(P, k, tau)`: the key's code location C_{P,k,tau}
+    KeyCode { p: Box<PExpr>, k: DecoId, tau: DecoId, span: Span },
+    /// `ackloc(n)`: the n-th acknowledgement location; printed by `expand`
+    /// so that an elaborated `;` re-parses, not meant to be written
+    AckLoc(u64),
     Drop(NExpr),
     Ref(Id),
     App { def: Id, args: Vec<Arg>, label: Option<Id> },
@@ -68,7 +104,10 @@ pub enum PExpr {
 #[derive(Clone, Debug)]
 pub enum NExpr {
     Ident(Id),
-    Quote { proc: Box<PExpr>, timbre: Id, datum: Id },
+    /// `<@P, t, d>`; `@P` is `<@P, _, _>`
+    Quote { proc: Box<PExpr>, timbre: DecoId, datum: DecoId },
+    /// application of a definition that returns a name (`touch(P, k, d)`)
+    App { def: Id, args: Vec<Arg> },
 }
 
 #[derive(Clone, Debug)]
@@ -82,12 +121,27 @@ pub enum SExpr {
 pub enum Arg {
     Proc(PExpr),
     Name(NExpr),
-    Timbre(Id),
-    Datum(Id),
+    Timbre(DecoId),
+    Datum(DecoId),
     Clause(CExpr),
     Str(SExpr),
     Cont(ContExpr),
+    Pitchset(PSet),
+    List(Vec<Arg>, Span),
+    Tuple(Vec<Arg>, Span),
+    /// the hole of a continuation (a name argument written `_`)
     Hole(Span),
+}
+
+/// A pitch set as written.
+#[derive(Clone, Debug)]
+pub enum PSet {
+    /// `{A2, E2, ...}`
+    Lit(Vec<Id>),
+    /// `pitches`, `pitches-r`, a declared `pitchset`, or a parameter
+    Ref(Id),
+    Pitches,
+    PitchesR,
 }
 
 #[derive(Clone, Debug)]
@@ -103,11 +157,15 @@ pub enum GenSet {
     Durations,
     DurationsPlus,
     List(Vec<Id>),
+    /// a pitch set or list parameter, or a declared pitch set
+    Ref(Id),
 }
 
+/// `x in S` or `(x, y) in S` (a tuple pattern over a list of tuples)
 #[derive(Clone, Debug)]
 pub struct Gen {
-    pub var: Id,
+    pub vars: Vec<Id>,
+    pub tuple: bool,
     pub set: GenSet,
 }
 
@@ -155,7 +213,7 @@ pub enum BExpr {
 pub enum AtomAst {
     Pitch(u8, Id),
     Dur(u8, Id),
-    Carry(u8, Id),
+    Carry(u8, DecoId),
     Step(u8, i64),
     At(SpAst),
     Passes(u8, SpAst),
@@ -174,15 +232,24 @@ pub enum SpAst {
     And(Vec<SpAst>),
     Or(Vec<SpAst>),
     Par(Box<SpAst>, Box<SpAst>),
-    Out { subj: NPat, payload: Box<SpAst>, ptimbre: Option<Id>, carry: Option<Id> },
+    Out { subj: NPat, payload: Box<SpAst>, ptimbre: PatId, carry: PatId },
     In { subj: NPat, body: Box<SpAst> },
+}
+
+/// A decoration pattern: `?` (anything), `_` (only a wildcard), or a name.
+#[derive(Clone, Debug)]
+pub enum PatId {
+    Any,
+    Wild,
+    Id(Id),
 }
 
 #[derive(Clone, Debug)]
 pub struct NPat {
+    /// `None` is `?`
     pub quote: Option<Box<SpAst>>,
-    pub timbre: Option<Id>,
-    pub datum: Option<Id>,
+    pub timbre: PatId,
+    pub datum: PatId,
 }
 
 #[derive(Clone, Debug)]
@@ -202,6 +269,8 @@ pub enum CfgAst {
 pub enum PitchEntry {
     Named(Id, Option<u8>),
     Scale { kind: String, lo: Id, hi: Id },
+    /// `piano88`: A0 .. C8
+    Piano88(Span),
 }
 
 #[derive(Clone, Debug)]
@@ -212,10 +281,17 @@ pub struct TimbreEntry {
 }
 
 #[derive(Clone, Debug)]
+pub enum DefBody {
+    Proc(PExpr),
+    /// `def f(...): name = <...>`
+    Name(NExpr),
+}
+
+#[derive(Clone, Debug)]
 pub struct Def {
     pub name: Id,
     pub params: Vec<(Id, Sort)>,
-    pub body: PExpr,
+    pub body: DefBody,
     pub file: String,
 }
 
@@ -227,6 +303,8 @@ pub struct File {
     pub timbres: Option<(Vec<TimbreEntry>, Span)>,
     pub defs: Vec<Def>,
     pub factors: Vec<(Id, CExpr)>,
+    /// `pitchset NAME = { ... }`
+    pub pitchsets: Vec<(Id, Vec<Id>)>,
     pub play: Option<(PExpr, Span)>,
     pub file: String,
 }

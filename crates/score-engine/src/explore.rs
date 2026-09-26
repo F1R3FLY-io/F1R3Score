@@ -91,15 +91,12 @@ impl Explorer {
             }
             let mut h = Sha256::new();
             h.update(&self.digester.truncated(arena, clauses, l.quote, d));
-            h.update(&l.timbre.0.to_be_bytes());
             let mut rs: Vec<Vec<u8>> = st
                 .recvs
                 .iter()
                 .map(|r| {
                     let mut v = vec![b'r'];
-                    for x in &r.data {
-                        v.extend_from_slice(&x.0.to_be_bytes());
-                    }
+                    v.extend_from_slice(format!("{:?}", r.subjects).as_bytes());
                     v.extend_from_slice(&r.clause.0.to_be_bytes());
                     v.extend_from_slice(&self.digester.truncated(arena, clauses, r.body, d + 1));
                     v
@@ -110,10 +107,9 @@ impl Explorer {
                 .iter()
                 .map(|s| {
                     let mut v = vec![b's'];
-                    v.extend_from_slice(&s.datum.0.to_be_bytes());
+                    v.extend_from_slice(format!("{:?}", s.subj).as_bytes());
                     v.extend_from_slice(&self.digester.truncated(arena, clauses, s.payload, d + 1));
-                    v.extend_from_slice(&s.ptimbre.0.to_be_bytes());
-                    v.extend_from_slice(&s.carry.0.to_be_bytes());
+                    v.extend_from_slice(format!("{:?}{:?}", s.ptimbre, s.carry).as_bytes());
                     v
                 })
                 .collect();
@@ -167,7 +163,7 @@ impl Explorer {
                 for c in cands {
                     let mut s2 = soup.clone();
                     let mut touched = BTreeSet::new();
-                    s2.fire(arena, alph, l, std::slice::from_ref(&c), &mut touched)?;
+                    s2.fire(arena, clauses, alph, l, std::slice::from_ref(&c), &mut touched)?;
                     Self::prune(&mut s2, arena, clauses, alph, Some(&touched), self.max_alternatives)?;
                     let m = self.node_for(s2, arena, clauses)?;
                     if self.nodes[m].edges.is_none() {
@@ -207,7 +203,7 @@ impl Explorer {
 
     fn guard(&self, g: &Crisp, e: &Edge, arena: &Arena, alph: &Alphabets) -> Result<bool, EngineError> {
         let mut ev = Evaluator::new(arena, alph);
-        let view = View { timbre: e.loc.timbre, loc: e.loc.quote, slots: &e.slots };
+        let view = View { timbre: e.slots[0].timbre, loc: e.loc.quote, slots: &e.slots };
         let r = ev.crisp(g, &view, &mut LocalOnly);
         if let Some(err) = ev.error {
             return Err(EngineError::eval(err));
@@ -291,7 +287,7 @@ pub fn residue(
 ) -> Result<Soup, EngineError> {
     let mut s = config.clone();
     let mut touched = BTreeSet::new();
-    s.fire(arena, alph, loc, std::slice::from_ref(c), &mut touched)?;
+    s.fire(arena, clauses, alph, loc, std::slice::from_ref(c), &mut touched)?;
     Explorer::prune(&mut s, arena, clauses, alph, Some(&touched), bound)?;
     Ok(s)
 }

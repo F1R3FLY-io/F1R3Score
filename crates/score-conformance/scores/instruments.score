@@ -1,0 +1,12 @@
+// Propositions 9.2 and 9.4: two touches aimed at one key queue; a
+// synchronous step releases its continuation when its longest note ends.
+score Instruments
+import std
+pitches   { r, C4, E4, G4 }
+durations { q = 1/4, h = 1/2 }
+timbres   { piano = gm(0) on 1 }
+def P = base "P"
+play Keyboard(P, piano, 1, pitches-r)
+   | touch(P, C4, h)!(0) ; 0
+   | touch(P, C4, q)!(0) ; 0
+   | ( touch(P, E4, q)!(0) | touch(P, G4, h)!(0) ) ; touch(P, C4, q)!(0) ; 0

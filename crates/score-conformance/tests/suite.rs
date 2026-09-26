@@ -171,11 +171,12 @@ fn t8_idioms_read_from_the_past() {
 
 #[test]
 fn t9_table_equals_its_formula() {
+    use score_core::{Datum, Hat, Timbre};
     use score_logic::*;
     let s = load_file("t1_law.score");
     let mut a = s.arena;
     let alph = s.alph;
-    let tables: Vec<Table> = (0..s.clauses.len() as u32)
+    let mut tables: Vec<Table> = (0..s.clauses.len() as u32)
         .filter_map(|i| match s.clauses.get(score_core::ClauseId(i)) {
             Graded::Table(t) => Some(t.clone()),
             Graded::Tensor(v) => v.iter().find_map(|g| if let Graded::Table(t) = g { Some(t.clone()) } else { None }),
@@ -183,24 +184,34 @@ fn t9_table_equals_its_formula() {
         })
         .collect();
     assert!(tables.len() >= 2);
-    let mut rng = score_chance::Prng::new(2);
     let np = alph.n_pitches() as u64;
     let nd = 5;
+    // a `dur`-keyed table, as a chimera's articulation clause (Example 9.7)
+    let mut entries = std::collections::BTreeMap::new();
+    for (i, w) in [(0u64, 9), (1, 1), (2, 1)] {
+        entries.insert([KeyVal::D(Datum((np + i) as u16)), KeyVal::Pad, KeyVal::Pad], score_core::Q::int(w));
+    }
+    tables.push(Table { key: vec![KeyFn::Dur(0)], entries, default: score_core::Q::new(1, 2) });
+    let mut rng = score_chance::Prng::new(2);
     let base = score_core::base::base(&mut a, "x", alph.rest());
+    let t0 = Hat::Is(Timbre(0));
     let mut worst = 0usize;
     for _ in 0..3000 {
-        let d = |i: u64| score_core::Datum((np + i) as u16);
-        let p = |i: u64| score_core::Datum(i as u16);
-        let nil = a.nil();
-        let _ = nil;
-        let h = a.send(
-            a.quote(base, score_core::Timbre(0), d(rng.below(nd))),
-            base,
-            score_core::Timbre(0),
-            p(rng.below(np)),
-        );
-        let slots = [SlotView { pitch: p(rng.below(np)), dur: d(rng.below(nd)), carry: p(rng.below(np)), passes: base }];
-        let view = View { timbre: score_core::Timbre(0), loc: h, slots: &slots };
+        let d = |i: u64| Datum((np + i) as u16);
+        let p = |i: u64| Datum(i as u16);
+        let h = a.send(a.quote(base, t0, Hat::Is(d(rng.below(nd)))), base, t0, Hat::Is(p(rng.below(np))));
+        // the carried datum is sometimes open: tables keyed by it are then
+        // undefined there, and so is their formula
+        let carry = if rng.below(6) == 0 { Hat::Wild } else { Hat::Is(p(rng.below(np))) };
+        let slots = [SlotView {
+            timbre: Timbre(0),
+            pitch: p(rng.below(np)),
+            dur: d(rng.below(nd)),
+            carry,
+            ptimbre: Hat::Wild,
+            passes: base,
+        }];
+        let view = View { timbre: Timbre(0), loc: h, slots: &slots };
         let mut ev = Evaluator::new(&a, &alph);
         for t in &tables {
             let x = ev.table(t, &view);
@@ -228,6 +239,17 @@ fn t10_reflective_voice_plays_the_unrolled_voice() {
                 let mut e = engine(s, cfg(true), src);
                 let (_, evs) = run(&mut e, &Limits { notes: Some(590), ..Default::default() });
                 if f.contains("reflective") {
+                    // every request and every refresh delivered to the server
+                    // passes a general name: both payload decorations `_`
+                    let null_records: Vec<_> = evs
+                        .iter()
+                        .flat_map(|ev| ev.records.iter())
+                        .filter(|(_, r)| !e.alph.len(score_core::nu(r, &e.alph).unwrap().dur).is_positive())
+                        .collect();
+                    assert!(!null_records.is_empty());
+                    assert!(null_records
+                        .iter()
+                        .all(|(_, r)| r.ptimbre == score_core::Hat::Wild && r.carry == score_core::Hat::Wild));
                     let zero: Vec<&Note> = evs
                         .iter()
                         .flat_map(|ev| ev.notes.iter())

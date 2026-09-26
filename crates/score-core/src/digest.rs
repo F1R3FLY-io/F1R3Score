@@ -5,7 +5,8 @@
 //! encoding in which the children of a parallel composition are ordered by
 //! their own digests. Labels (stream-key annotations) are excluded.
 
-use crate::alphabet::Timbre;
+use crate::alphabet::{Datum, Timbre};
+use crate::hat::Hat;
 use crate::sha256::Sha256;
 use crate::term::{Arena, ClauseId, Name, Proc, ProcId};
 use std::collections::HashMap;
@@ -23,8 +24,24 @@ pub struct Digester {
     trunc: HashMap<(ProcId, u32), Digest>,
 }
 
-fn put_timbre(h: &mut Sha256, t: Timbre) {
-    h.update(&t.0.to_be_bytes());
+fn put_timbre(h: &mut Sha256, t: Hat<Timbre>) {
+    match t {
+        Hat::Is(t) => {
+            h.update(b"t");
+            h.update(&t.0.to_be_bytes())
+        }
+        Hat::Wild => h.update(b"_"),
+    }
+}
+
+fn put_datum(h: &mut Sha256, d: Hat<Datum>) {
+    match d {
+        Hat::Is(d) => {
+            h.update(b"d");
+            h.update(&d.0.to_be_bytes())
+        }
+        Hat::Wild => h.update(b"_"),
+    }
 }
 
 impl Digester {
@@ -65,7 +82,7 @@ impl Digester {
                 let d = self.proc(a, cl, *payload);
                 h.update(&d);
                 put_timbre(&mut h, *ptimbre);
-                h.update(&carry.0.to_be_bytes());
+                put_datum(&mut h, *carry);
             }
             Proc::Drop(n) => {
                 h.update(b"D");
@@ -92,7 +109,7 @@ impl Digester {
                 let d = self.proc(a, cl, proc);
                 h.update(&d);
                 put_timbre(h, timbre);
-                h.update(&datum.0.to_be_bytes());
+                put_datum(h, datum);
             }
         }
     }
@@ -135,7 +152,7 @@ impl Digester {
                 let d = self.truncated(a, cl, *payload, depth - 1);
                 h.update(&d);
                 put_timbre(&mut h, *ptimbre);
-                h.update(&carry.0.to_be_bytes());
+                put_datum(&mut h, *carry);
             }
             Proc::Drop(n) => {
                 h.update(b"D");
@@ -154,7 +171,7 @@ impl Digester {
                 let d = self.truncated(a, cl, proc, depth);
                 h.update(&d);
                 put_timbre(h, timbre);
-                h.update(&datum.0.to_be_bytes());
+                put_datum(h, datum);
             }
             Name::Var(i) => {
                 h.update(b"v");

@@ -10,25 +10,30 @@
 
 use crate::ast::*;
 use crate::lexer::{Diag, Span};
-use score_core::alphabet::{expand_scale, scientific_midi};
-use score_core::base::base;
+use score_core::alphabet::{expand_scale, piano88, scientific_midi};
+use score_core::base::{ackloc, base, keycode, keyloc};
 use score_core::digest::Digester;
 use score_core::sha256::{hex, Sha256};
 use score_core::*;
 use score_logic::formula as f;
 use score_logic::{ClauseArena, Crisp, Graded, KeyFn, KeyVal, Locality, Sp};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Val {
     Proc(ProcId),
     Name(Name),
-    Timbre(Timbre),
-    Datum(Datum),
+    /// a timbre argument, possibly `_`
+    Timbre(Hat<Timbre>),
+    /// a datum argument or generator value, possibly `_`
+    Datum(Hat<Datum>),
     Clause(ClauseId),
     Str(String),
     Cont(Rc<ContVal>),
+    Pitchset(Vec<Datum>),
+    List(Vec<Val>),
+    Tuple(Vec<Val>),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -66,6 +71,8 @@ struct Env {
     level: u32,
     file: String,
     nu: Vec<(String, u32)>,
+    /// > 0 while elaborating a message payload (a quote that may be re-run)
+    in_payload: u32,
 }
 impl Env {
     fn get(&self, n: &str) -> Option<&Val> {
@@ -80,7 +87,11 @@ struct Elab<'a> {
     defs: &'a [Def],
     index: HashMap<String, usize>,
     factors: HashMap<String, Graded>,
-    memo: HashMap<(usize, Vec<Val>), ProcId>,
+    pitchsets: HashMap<String, Vec<Datum>>,
+    memo: HashMap<(usize, Vec<Val>, bool), ProcId>,
+    name_memo: HashMap<(usize, Vec<Val>), Name>,
+    /// the next synchronous-output site's acknowledgement location index
+    acks: u64,
     warnings: Vec<Diag>,
     nu_counter: u32,
     behavioural: bool,
@@ -108,6 +119,7 @@ pub fn alphabets(file: &File) -> R<Alphabets> {
             PitchEntry::Scale { kind, lo, hi } => {
                 pitches.extend(expand_scale(&kind, &lo.name, &hi.name).map_err(|e| diag(fname, lo.span, e))?);
             }
+            PitchEntry::Piano88(_) => pitches.extend(piano88()),
         }
     }
     let durations = file
@@ -145,7 +157,7 @@ pub fn elaborate(file: &File) -> R<Score> {
 /// The digest of a score: alphabets and the initial configuration, id-independent.
 pub fn score_digest(alph: &Alphabets, arena: &Arena, clauses: &ClauseArena, initial: &[(Q, ProcId)]) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update(b"f1r3score/1\n");
+    h.update(b"f1r3score/2\n");
     for p in &alph.pitches {
         h.update(format!("p {} {:?}\n", p.name, p.midi).as_bytes());
     }
@@ -184,14 +196,24 @@ pub fn elaborate_into(
         defs: &file.defs,
         index,
         factors: HashMap::new(),
+        pitchsets: HashMap::new(),
         memo: HashMap::new(),
+        name_memo: HashMap::new(),
+        acks: 0,
         warnings: vec![],
         nu_counter: 0,
         behavioural: false,
         window: 0,
     };
+    for (id, v) in &file.pitchsets {
+        let env = Env { scope: vec![], level: 0, file: file.file.clone(), nu: vec![], in_payload: 0 };
+        let ds = v.iter().map(|x| e.datum(x, &env, Some(Sort::Pitch))).collect::<R<Vec<_>>>()?;
+        if e.pitchsets.insert(id.name.clone(), ds).is_some() {
+            return Err(diag(&file.file, id.span, format!("pitch set `{}` defined twice", id.name)));
+        }
+    }
     for (id, c) in &file.factors {
-        let mut env = Env { scope: vec![], level: 0, file: file.file.clone(), nu: vec![] };
+        let mut env = Env { scope: vec![], level: 0, file: file.file.clone(), nu: vec![], in_payload: 0 };
         let g = e.graded(c, &mut env)?;
         // admit the factor on its own, so its diagnostics point at it
         e.intern(g.clone(), &file.file, id.span)?;
@@ -212,7 +234,7 @@ pub fn elaborate_into(
     // the initial configuration: one parallel composition per distinct stamp
     let mut by_stamp: BTreeMap<Q, Vec<ProcId>> = BTreeMap::new();
     for (t, x) in items {
-        let mut env = Env { scope: vec![], level: 0, file: file.file.clone(), nu: vec![] };
+        let mut env = Env { scope: vec![], level: 0, file: file.file.clone(), nu: vec![], in_payload: 0 };
         let p = e.proc(&x, &mut env)?;
         by_stamp.entry(t).or_default().push(p);
     }
@@ -233,6 +255,11 @@ fn check_acyclic(defs: &[Def], index: &HashMap<String, usize>) -> R<()> {
                 refs_n(subj, out);
                 refs_p(payload, out)
             }
+            PExpr::Seq { step, rest, .. } => {
+                step.iter().for_each(|x| refs_p(x, out));
+                refs_p(rest, out)
+            }
+            PExpr::KeyLoc { p, .. } | PExpr::KeyCode { p, .. } => refs_p(p, out),
             PExpr::Drop(n) => refs_n(n, out),
             PExpr::App { def, args, .. } => {
                 out.push((def.name.clone(), def.span));
@@ -250,14 +277,20 @@ fn check_acyclic(defs: &[Def], index: &HashMap<String, usize>) -> R<()> {
         }
     }
     fn refs_n(n: &NExpr, out: &mut Vec<(String, Span)>) {
-        if let NExpr::Quote { proc, .. } = n {
-            refs_p(proc, out)
+        match n {
+            NExpr::Quote { proc, .. } => refs_p(proc, out),
+            NExpr::App { def, args } => {
+                out.push((def.name.clone(), def.span));
+                args.iter().for_each(|a| refs_a(a, out))
+            }
+            NExpr::Ident(_) => {}
         }
     }
     fn refs_a(a: &Arg, out: &mut Vec<(String, Span)>) {
         match a {
             Arg::Proc(p) => refs_p(p, out),
             Arg::Name(n) => refs_n(n, out),
+            Arg::List(v, _) | Arg::Tuple(v, _) => v.iter().for_each(|x| refs_a(x, out)),
             Arg::Cont(c) => {
                 out.push((c.def.name.clone(), c.def.span));
                 c.args.iter().for_each(|a| refs_a(a, out))
@@ -269,7 +302,10 @@ fn check_acyclic(defs: &[Def], index: &HashMap<String, usize>) -> R<()> {
     let mut edges = vec![vec![]; n];
     for (i, d) in defs.iter().enumerate() {
         let mut out = vec![];
-        refs_p(&d.body, &mut out);
+        match &d.body {
+            DefBody::Proc(p) => refs_p(p, &mut out),
+            DefBody::Name(n) => refs_n(n, &mut out),
+        }
         for (r, sp) in out {
             if let Some(&j) = index.get(&r) {
                 edges[i].push((j, sp));
@@ -288,7 +324,7 @@ fn check_acyclic(defs: &[Def], index: &HashMap<String, usize>) -> R<()> {
                     format!(
                         "recursive definition: `{}` refers to `{}`, which leads back to it. Definitions are \
                          macros and must form an acyclic call graph; unbounded behaviour is obtained by \
-                         reflection, not by recursion (note, Section 4.2 and Remark 2.1: use a server that \
+                         reflection, not by recursion (note, Section 5.2 and Remark 2.2: use a server that \
                          keeps its own code on a code channel, as `Voice` in std.score does)",
                         defs[i].name.name, defs[j].name.name
                     ),
@@ -309,45 +345,67 @@ fn check_acyclic(defs: &[Def], index: &HashMap<String, usize>) -> R<()> {
     Ok(())
 }
 
+/// Lints on the initial configuration (spec, "Diagnostics and lints"): a
+/// subject with datum `_` has no polarity and never communicates; a location
+/// where every receipt and message leaves its timbre open can never meet; and
+/// a location holding only one polarity on both sides can never communicate.
 fn lint_initial(a: &Arena, alph: &Alphabets, initial: &[(Q, ProcId)], file: &str, sp: Span, w: &mut Vec<Diag>) {
-    let mut at: HashMap<Loc, (HashSet<bool>, HashSet<bool>)> = HashMap::new();
+    #[derive(Default)]
+    struct At {
+        recv: Vec<Deco>,
+        send: Vec<Deco>,
+    }
+    let mut at: BTreeMap<ProcId, At> = BTreeMap::new();
     for (_, p) in initial {
         for c in a.components(*p) {
             match a.get(c) {
                 Proc::Recv { subjects, .. } => {
                     for s in subjects.iter() {
                         if let Name::Quote { proc, timbre, datum } = s {
-                            at.entry(Loc { quote: *proc, timbre: *timbre })
-                                .or_default()
-                                .0
-                                .insert(alph.is_pitch(*datum));
+                            if *timbre == Hat::Is(Timbre::DEAD) {
+                                continue;
+                            }
+                            at.entry(*proc).or_default().recv.push(Deco { timbre: *timbre, datum: *datum });
                         }
                     }
                 }
                 Proc::Send { subj: Name::Quote { proc, timbre, datum }, .. } => {
-                    at.entry(Loc { quote: *proc, timbre: *timbre }).or_default().1.insert(alph.is_pitch(*datum));
+                    at.entry(*proc).or_default().send.push(Deco { timbre: *timbre, datum: *datum });
                 }
                 _ => {}
             }
         }
     }
-    let mut locs: Vec<_> = at.into_iter().collect();
-    locs.sort_by_key(|x| x.0);
-    for (l, (r, m)) in locs {
-        for pol in [true, false] {
-            if r.contains(&pol) && m.contains(&pol) && !m.contains(&!pol) && !r.contains(&!pol) {
-                w.push(diag(
-                    file,
-                    sp,
-                    format!(
-                        "warning: a top-level receipt and message of the same polarity ({}) share a location in \
-                         timbre `{}`; they can never communicate (Proposition 2.4(ii))",
-                        if pol { "channel" } else { "co-channel" },
-                        alph.timbre_name(l.timbre)
-                    ),
-                ));
-            }
+    let mut open_datum = false;
+    for (_, x) in at {
+        if x.recv.iter().chain(x.send.iter()).any(|d| d.datum.is_wild()) {
+            open_datum = true;
         }
+        if x.recv.is_empty() || x.send.is_empty() {
+            continue;
+        }
+        let any_match = x.recv.iter().any(|r| x.send.iter().any(|m| subjects_match(*r, *m, alph).is_some()));
+        if any_match {
+            continue;
+        }
+        let all_open = x.recv.iter().chain(x.send.iter()).all(|d| d.timbre.is_wild());
+        let msg = if all_open {
+            "warning: at one location every receipt and message leaves its timbre open, and nothing else is \
+             there to meet them; two open timbres never communicate (Proposition 2.10(ii))"
+                .to_string()
+        } else {
+            "warning: a top-level receipt and message share a location but their subjects never match (same \
+             polarity, or timbres that do not meet); they can never communicate (Proposition 2.10(ii))"
+                .to_string()
+        };
+        w.push(diag(file, sp, msg));
+    }
+    if open_datum {
+        w.push(diag(
+            file,
+            sp,
+            "warning: a subject has datum `_`: it has no polarity and can never communicate (Proposition 2.10(ii))",
+        ));
     }
 }
 
@@ -365,9 +423,23 @@ impl<'a> Elab<'a> {
         }
     }
 
+    /// A concrete datum.
     fn datum(&self, id: &Id, env: &Env, want: Option<Sort>) -> R<Datum> {
+        match self.hat_datum(&DecoId::Id(id.clone()), env, want)? {
+            Hat::Is(d) => Ok(d),
+            Hat::Wild => Err(diag(&env.file, id.span, format!("`{}` is `_` here, and a concrete datum is needed", id.name))),
+        }
+    }
+
+    /// A datum that may be the wildcard.
+    fn hat_datum(&self, d: &DecoId, env: &Env, want: Option<Sort>) -> R<Hat<Datum>> {
+        let id = match d {
+            DecoId::Wild(_) => return Ok(Hat::Wild),
+            DecoId::Id(id) => id,
+        };
         let d = match env.get(&id.name) {
-            Some(Val::Datum(d)) => *d,
+            Some(Val::Datum(Hat::Wild)) => return Ok(Hat::Wild),
+            Some(Val::Datum(Hat::Is(d))) => *d,
             Some(v) => {
                 return Err(diag(&env.file, id.span, format!("`{}` is a {}, not a datum", id.name, kind(v))))
             }
@@ -382,17 +454,38 @@ impl<'a> Elab<'a> {
             Some(Sort::Dur) if self.alph.is_pitch(d) => {
                 Err(diag(&env.file, id.span, format!("`{}` is a pitch where a duration is expected", id.name)))
             }
-            _ => Ok(d),
+            _ => Ok(Hat::Is(d)),
         }
     }
 
+    /// A concrete timbre.
     fn timbre(&self, id: &Id, env: &Env) -> R<Timbre> {
+        match self.hat_timbre(&DecoId::Id(id.clone()), env)? {
+            Hat::Is(t) => Ok(t),
+            Hat::Wild => Err(diag(&env.file, id.span, format!("`{}` is `_` here, and a concrete timbre is needed", id.name))),
+        }
+    }
+
+    /// A timbre that may be the wildcard. `ctl` names the control timbre;
+    /// `dead` may not be written (only `base` and `keyloc` emit it).
+    fn hat_timbre(&self, d: &DecoId, env: &Env) -> R<Hat<Timbre>> {
+        let id = match d {
+            DecoId::Wild(_) => return Ok(Hat::Wild),
+            DecoId::Id(id) => id,
+        };
         match env.get(&id.name) {
             Some(Val::Timbre(t)) => Ok(*t),
             Some(v) => Err(diag(&env.file, id.span, format!("`{}` is a {}, not a timbre", id.name, kind(v)))),
+            None if id.name == "dead" => Err(diag(
+                &env.file,
+                id.span,
+                "`dead` is the reserved dead timbre; user code may not write it (bases and key locations use it)",
+            )),
+            None if id.name == "ctl" => Ok(Hat::Is(Timbre::CTL)),
             None => self
                 .alph
                 .lookup_timbre(&id.name)
+                .map(Hat::Is)
                 .ok_or_else(|| diag(&env.file, id.span, format!("`{}` is not a declared timbre", id.name))),
         }
     }
@@ -417,32 +510,94 @@ impl<'a> Elab<'a> {
             },
             NExpr::Quote { proc, timbre, datum } => {
                 let p = self.proc(proc, env)?;
-                let t = self.timbre(timbre, env)?;
-                let d = self.datum(datum, env, None)?;
+                let t = self.hat_timbre(timbre, env)?;
+                let d = self.hat_datum(datum, env, None)?;
                 Ok(Name::Quote { proc: p, timbre: t, datum: d })
+            }
+            NExpr::App { def, args } => {
+                let di = *self
+                    .index
+                    .get(&def.name)
+                    .ok_or_else(|| diag(&env.file, def.span, format!("unknown definition `{}`", def.name)))?;
+                let params = self.defs[di].params.clone();
+                let mut vals = vec![];
+                for (a, (pid, s)) in args.iter().zip(params.iter()) {
+                    vals.push(self.arg(a, s, pid, env)?);
+                }
+                self.expand_name(di, vals, env)
             }
         }
     }
 
-    fn gen_values(&self, g: &Gen, env: &Env) -> R<Vec<Datum>> {
+    fn expand_name(&mut self, di: usize, vals: Vec<Val>, env: &Env) -> R<Name> {
+        let key = (di, vals);
+        if let Some(n) = self.name_memo.get(&key) {
+            return Ok(*n);
+        }
+        let d = &self.defs[di];
+        let DefBody::Name(body) = d.body.clone() else {
+            return Err(diag(&env.file, d.name.span, format!("`{}` does not return a name", d.name.name)));
+        };
+        let mut inner = Env {
+            scope: d.params.iter().map(|(i, _)| i.name.clone()).zip(key.1.iter().cloned()).collect(),
+            level: env.level,
+            file: d.file.clone(),
+            nu: vec![],
+            in_payload: env.in_payload,
+        };
+        let n = self.name(&body, &mut inner)?;
+        self.name_memo.insert(key, n);
+        Ok(n)
+    }
+
+    fn gen_values(&self, g: &Gen, env: &Env) -> R<Vec<Val>> {
+        let d = |v: Vec<Datum>| v.into_iter().map(|x| Val::Datum(Hat::Is(x))).collect::<Vec<_>>();
         Ok(match &g.set {
-            GenSet::Pitches => self.alph.all_pitches(),
-            GenSet::PitchesR => self.alph.ordered_pitches().to_vec(),
-            GenSet::Durations => self.alph.all_durations(),
-            GenSet::DurationsPlus => self.alph.positive_durations().to_vec(),
-            GenSet::List(v) => v.iter().map(|x| self.datum(x, env, None)).collect::<R<_>>()?,
+            GenSet::Pitches => d(self.alph.all_pitches()),
+            GenSet::PitchesR => d(self.alph.ordered_pitches().to_vec()),
+            GenSet::Durations => d(self.alph.all_durations()),
+            GenSet::DurationsPlus => d(self.alph.positive_durations().to_vec()),
+            GenSet::List(v) => d(v.iter().map(|x| self.datum(x, env, None)).collect::<R<_>>()?),
+            GenSet::Ref(id) => match env.get(&id.name) {
+                Some(Val::Pitchset(v)) => d(v.clone()),
+                Some(Val::List(v)) => v.clone(),
+                Some(v) => {
+                    return Err(diag(&env.file, id.span, format!("`{}` is a {}, not a set or list", id.name, kind(v))))
+                }
+                None => match self.pitchsets.get(&id.name) {
+                    Some(v) => d(v.clone()),
+                    None => return Err(diag(&env.file, id.span, format!("unknown set or list `{}`", id.name))),
+                },
+            },
         })
     }
 
-    fn product(&self, gens: &[Gen], env: &Env) -> R<Vec<Vec<(String, Datum)>>> {
-        let mut acc: Vec<Vec<(String, Datum)>> = vec![vec![]];
+    /// The bindings of each combination of the generators.
+    fn product(&self, gens: &[Gen], env: &Env) -> R<Vec<Vec<(String, Val)>>> {
+        let mut acc: Vec<Vec<(String, Val)>> = vec![vec![]];
         for g in gens {
             let vals = self.gen_values(g, env)?;
             let mut next = vec![];
             for a in &acc {
                 for v in &vals {
                     let mut b = a.clone();
-                    b.push((g.var.name.clone(), *v));
+                    if g.tuple {
+                        let Val::Tuple(parts) = v else {
+                            return Err(diag(&env.file, g.vars[0].span, "a tuple pattern ranges over a list of tuples"));
+                        };
+                        if parts.len() != g.vars.len() {
+                            return Err(diag(
+                                &env.file,
+                                g.vars[0].span,
+                                format!("the pattern has {} names but the tuples have {} parts", g.vars.len(), parts.len()),
+                            ));
+                        }
+                        for (x, p) in g.vars.iter().zip(parts.iter()) {
+                            b.push((x.name.clone(), p.clone()));
+                        }
+                    } else {
+                        b.push((g.vars[0].name.clone(), v.clone()));
+                    }
                     next.push(b);
                 }
             }
@@ -494,27 +649,28 @@ impl<'a> Elab<'a> {
                 let lab = label.as_ref().map(|x| self.arena.label(&x.name));
                 Ok(self.arena.recv(subjects, cid, closed, lab))
             }
-            PExpr::Send { subj, payload, timbre, datum, span } => {
-                let s = self.name(subj, env)?;
-                let p = self.proc(payload, env)?;
-                let t = self.timbre(timbre, env)?;
-                let d = self.datum(datum, env, None)?;
-                if let Name::Quote { timbre: st, .. } = s {
-                    if st != t {
-                        self.warnings.push(diag(
-                            &env.file,
-                            *span,
-                            format!(
-                                "warning: the payload timbre `{}` differs from the subject's timbre `{}`; this \
-                                 message can never communicate",
-                                self.alph.timbre_name(t),
-                                self.alph.timbre_name(st)
-                            ),
-                        ));
-                    }
-                }
+            PExpr::Send { subj, payload, deco, .. } => {
+                // a payload whose timbre differs from the subject's is how a
+                // line passes between instruments: no warning (revision 2)
+                let (s, p, t, d) = self.send_parts(subj, payload, deco, env)?;
                 Ok(self.arena.send(s, p, t, d))
             }
+            PExpr::Seq { step, rest, span } => self.seq(step, rest, *span, env),
+            PExpr::KeyLoc { p, k, .. } => {
+                let p = self.proc(p, env)?;
+                let k = self.key_pitch(k, env)?;
+                Ok(keyloc(self.arena, p, k))
+            }
+            PExpr::KeyCode { p, k, tau, span } => {
+                let p = self.proc(p, env)?;
+                let k = self.key_pitch(k, env)?;
+                let t = match self.hat_timbre(tau, env)? {
+                    Hat::Is(t) => t,
+                    Hat::Wild => return Err(diag(&env.file, *span, "a key's code location names a concrete timbre")),
+                };
+                Ok(keycode(self.arena, p, k, t))
+            }
+            PExpr::AckLoc(n) => Ok(ackloc(self.arena, *n, self.alph.rest(), self.alph.eps())),
             PExpr::Drop(n) => {
                 let n = self.name(n, env)?;
                 Ok(self.arena.drop_name(n))
@@ -532,7 +688,7 @@ impl<'a> Elab<'a> {
                 let params = self.defs[di].params.clone();
                 let mut vals = vec![];
                 for (a, (pid, s)) in args.iter().zip(params.iter()) {
-                    vals.push(self.arg(a, *s, pid, env)?);
+                    vals.push(self.arg(a, s, pid, env)?);
                 }
                 let p = self.expand(di, vals, env)?;
                 Ok(match label {
@@ -559,7 +715,7 @@ impl<'a> Elab<'a> {
                 for c in combos {
                     let mark = env.scope.len();
                     for (k, d) in c {
-                        env.scope.push((k, Val::Datum(d)));
+                        env.scope.push((k, d));
                     }
                     let r = self.proc(body, env);
                     env.scope.truncate(mark);
@@ -574,15 +730,16 @@ impl<'a> Elab<'a> {
                     Some(x) => self.proc(x, env)?,
                     None => self.arena.nil(),
                 };
-                let rest = self.alph.rest();
+                // N(p, d; K) := for(_ <- <@L,t,p>) K | <@L,t,d>!(0): each written
+                // note passes the general name @0 (Section 2.5)
                 for (p, d) in notes.iter().rev() {
                     let pd = self.datum(p, env, Some(Sort::Pitch))?;
                     let dd = self.datum(d, env, Some(Sort::Dur))?;
                     let body = self.arena.close(k, env.level, 1);
-                    let hand = self.arena.recv(vec![Name::Quote { proc: l, timbre: t, datum: pd }], ClauseId::TRUE, body, None);
+                    let key = self.arena.recv(vec![Name::concrete(l, t, pd)], ClauseId::TRUE, body, None);
                     let nil = self.arena.nil();
-                    let msg = self.arena.send(Name::Quote { proc: l, timbre: t, datum: dd }, nil, t, rest);
-                    k = self.arena.par([hand, msg]);
+                    let msg = self.arena.send_general(Name::concrete(l, t, dd), nil);
+                    k = self.arena.par([key, msg]);
                 }
                 Ok(k)
             }
@@ -599,29 +756,146 @@ impl<'a> Elab<'a> {
     }
 
     fn expand(&mut self, di: usize, vals: Vec<Val>, env: &Env) -> R<ProcId> {
-        let key = (di, vals);
+        let key = (di, vals, env.in_payload > 0);
         if let Some(&p) = self.memo.get(&key) {
             return Ok(p);
         }
         let d = &self.defs[di];
+        let DefBody::Proc(body) = d.body.clone() else {
+            return Err(diag(
+                &env.file,
+                d.name.span,
+                format!("`{}` returns a name; use it where a name is expected", d.name.name),
+            ));
+        };
         let mut inner = Env {
             scope: d.params.iter().map(|(i, _)| i.name.clone()).zip(key.1.iter().cloned()).collect(),
             level: env.level,
             file: d.file.clone(),
             nu: vec![],
+            in_payload: env.in_payload,
         };
-        let body = d.body.clone();
         let p = self.proc(&body, &mut inner)?;
         self.memo.insert(key, p);
         Ok(p)
     }
 
-    fn arg(&mut self, a: &Arg, s: Sort, pid: &Id, env: &mut Env) -> R<Val> {
+    fn key_pitch(&self, k: &DecoId, env: &Env) -> R<Datum> {
+        match (k, self.hat_datum(k, env, Some(Sort::Pitch))?) {
+            (_, Hat::Is(d)) => Ok(d),
+            (DecoId::Wild(sp), _) | (DecoId::Id(Id { span: sp, .. }), _) => {
+                Err(diag(&env.file, *sp, "a key location names a concrete pitch"))
+            }
+        }
+    }
+
+    /// The parts of a message: subject, payload (elaborated as a quote that
+    /// may be re-run) and payload decoration.
+    fn send_parts(
+        &mut self,
+        subj: &NExpr,
+        payload: &PExpr,
+        deco: &Option<(DecoId, DecoId)>,
+        env: &mut Env,
+    ) -> R<(Name, ProcId, Hat<Timbre>, Hat<Datum>)> {
+        let s = self.name(subj, env)?;
+        env.in_payload += 1;
+        let p = self.proc(payload, env);
+        env.in_payload -= 1;
+        let p = p?;
+        let (t, d) = match deco {
+            Some((t, d)) => (self.hat_timbre(t, env)?, self.hat_datum(d, env, None)?),
+            None => (Hat::Wild, Hat::Wild),
+        };
+        Ok((s, p, t, d))
+    }
+
+    /// Synchronous output (Def. 9.3):
+    ///   x!(Q) ; R           := x!(Q | Ack_A) | Wait^1_A R
+    ///   (x1!(Q1) | ...) ; R := prod_i xi!(Qi | Ack_A) | Wait^m_A R
+    /// with `Ack_A = <@A, ctl, eps>!(0)` and `Wait^m_A R` m nested receipts on
+    /// `<@A, ctl, r>`. `A` is fresh for each `;` the elaborator meets (spec,
+    /// decisions to confirm, item 4). A `;` under a message payload -- code
+    /// that reflection may run again -- would reuse `A` across runs, so it is
+    /// rejected.
+    fn seq(&mut self, step: &[PExpr], rest: &PExpr, span: Span, env: &mut Env) -> R<ProcId> {
+        if env.in_payload > 0 {
+            return Err(diag(
+                &env.file,
+                span,
+                "`;` inside a message payload: its acknowledgement location would be reused each time the \
+                 payload's code is run again, and acknowledgements from one run could release another \
+                 (spec, decisions to confirm, item 4). Write the sequence at the top of the piece.",
+            ));
+        }
+        let n = self.acks;
+        self.acks += 1;
+        let (rest_d, eps) = (self.alph.rest(), self.alph.eps());
+        let a = ackloc(self.arena, n, rest_d, eps);
+        let ctl = Hat::Is(Timbre::CTL);
+        let nil = self.arena.nil();
+        let ack = self.arena.send_general(Name::Quote { proc: a, timbre: ctl, datum: Hat::Is(eps) }, nil);
+        let mut out = vec![];
+        for x in step {
+            let PExpr::Send { subj, payload, deco, .. } = x else { unreachable!("the parser admits only messages") };
+            let (s, p, t, d) = self.send_parts(subj, payload, deco, env)?;
+            let p2 = self.arena.par([p, ack]);
+            out.push(self.arena.send(s, p2, t, d));
+        }
+        let mut r = self.proc(rest, env)?;
+        for _ in 0..step.len() {
+            let body = self.arena.close(r, env.level, 1);
+            r = self.arena.recv(vec![Name::Quote { proc: a, timbre: ctl, datum: Hat::Is(rest_d) }], ClauseId::TRUE, body, None);
+        }
+        out.push(r);
+        Ok(self.arena.par(out))
+    }
+
+    fn pset(&self, p: &PSet, env: &Env) -> R<Vec<Datum>> {
+        Ok(match p {
+            PSet::Pitches => self.alph.all_pitches(),
+            PSet::PitchesR => self.alph.ordered_pitches().to_vec(),
+            PSet::Lit(v) => v.iter().map(|x| self.datum(x, env, Some(Sort::Pitch))).collect::<R<_>>()?,
+            PSet::Ref(id) => match env.get(&id.name) {
+                Some(Val::Pitchset(v)) => v.clone(),
+                Some(v) => return Err(diag(&env.file, id.span, format!("`{}` is a {}, not a pitch set", id.name, kind(v)))),
+                None => self
+                    .pitchsets
+                    .get(&id.name)
+                    .cloned()
+                    .ok_or_else(|| diag(&env.file, id.span, format!("unknown pitch set `{}`", id.name)))?,
+            },
+        })
+    }
+
+    fn arg(&mut self, a: &Arg, s: &Sort, pid: &Id, env: &mut Env) -> R<Val> {
         Ok(match (a, s) {
             (Arg::Proc(p), Sort::Proc) => Val::Proc(self.proc(p, env)?),
             (Arg::Name(n), Sort::Name) => Val::Name(self.name(n, env)?),
-            (Arg::Timbre(t), Sort::Timbre) => Val::Timbre(self.timbre(t, env)?),
-            (Arg::Datum(d), Sort::Pitch) | (Arg::Datum(d), Sort::Dur) => Val::Datum(self.datum(d, env, Some(s))?),
+            (Arg::Name(NExpr::Ident(id)), Sort::List(_)) => match env.get(&id.name) {
+                Some(v @ Val::List(_)) => v.clone(),
+                _ => return Err(diag(&env.file, id.span, format!("`{}` is not a list parameter", id.name))),
+            },
+            (Arg::Timbre(t), Sort::Timbre) => Val::Timbre(self.hat_timbre(t, env)?),
+            (Arg::Datum(d), Sort::Pitch) | (Arg::Datum(d), Sort::Dur) => Val::Datum(self.hat_datum(d, env, Some(s.clone()))?),
+            (Arg::Pitchset(p), Sort::Pitchset) => Val::Pitchset(self.pset(p, env)?),
+            (Arg::List(v, _), Sort::List(inner)) => {
+                let mut out = vec![];
+                for x in v {
+                    out.push(self.arg(x, inner, pid, env)?);
+                }
+                Val::List(out)
+            }
+            (Arg::Tuple(v, sp), Sort::Tuple(parts)) => {
+                if v.len() != parts.len() {
+                    return Err(diag(&env.file, *sp, format!("a tuple of {} parts is expected", parts.len())));
+                }
+                let mut out = vec![];
+                for (x, q) in v.iter().zip(parts.iter()) {
+                    out.push(self.arg(x, q, pid, env)?);
+                }
+                Val::Tuple(out)
+            }
             (Arg::Clause(c), Sort::Clause) => {
                 env.nu.clear();
                 self.nu_counter = 0;
@@ -653,7 +927,7 @@ impl<'a> Elab<'a> {
                             holes += 1;
                             vals.push(None);
                         }
-                        a => vals.push(Some(self.arg(a, *qs, q, env)?)),
+                        a => vals.push(Some(self.arg(a, qs, q, env)?)),
                     }
                 }
                 if holes != 1 {
@@ -670,7 +944,7 @@ impl<'a> Elab<'a> {
                 return Err(diag(
                     &env.file,
                     pid.span,
-                    format!("ill-sorted argument for parameter `{}` of sort {}", pid.name, s.as_str()),
+                    format!("ill-sorted argument for parameter `{}` of sort {}", pid.name, s.show()),
                 ))
             }
         })
@@ -719,7 +993,7 @@ impl<'a> Elab<'a> {
                 for cb in combos {
                     let mark = env.scope.len();
                     for (k, d) in cb {
-                        env.scope.push((k, Val::Datum(d)));
+                        env.scope.push((k, d));
                     }
                     let r = self.graded(body, env);
                     env.scope.truncate(mark);
@@ -827,7 +1101,7 @@ impl<'a> Elab<'a> {
             MachineBody::Edges(v) => {
                 for (s, t, w) in v {
                     let want = Some(if pitch { Sort::Pitch } else { Sort::Dur });
-                    let sd = self.datum(s, env, want)?;
+                    let sd = self.datum(s, env, want.clone())?;
                     let td = self.datum(t, env, want)?;
                     if !pitch && (!self.alph.len(sd).is_positive() || !self.alph.len(td).is_positive()) {
                         return Err(diag(&env.file, s.span, "duration machines range over durations of positive length"));
@@ -896,7 +1170,7 @@ impl<'a> Elab<'a> {
                 for cb in combos {
                     let mark = env.scope.len();
                     for (k, d) in cb {
-                        env.scope.push((k, Val::Datum(d)));
+                        env.scope.push((k, d));
                     }
                     let r = self.crisp(body, env);
                     env.scope.truncate(mark);
@@ -911,7 +1185,7 @@ impl<'a> Elab<'a> {
             BExpr::Atom(a) => match a {
                 AtomAst::Pitch(s, d) => Crisp::Atom(f::Atom::Pitch(*s, self.datum(d, env, Some(Sort::Pitch))?)),
                 AtomAst::Dur(s, d) => Crisp::Atom(f::Atom::Dur(*s, self.datum(d, env, Some(Sort::Dur))?)),
-                AtomAst::Carry(s, d) => Crisp::Atom(f::Atom::Carry(*s, self.datum(d, env, None)?)),
+                AtomAst::Carry(s, d) => Crisp::Atom(f::Atom::Carry(*s, self.hat_datum(d, env, None)?)),
                 AtomAst::Step(s, k) => Crisp::Atom(f::Atom::Step(*s, *k)),
                 AtomAst::At(sp) => Crisp::Atom(f::Atom::At(self.sp(sp, env)?)),
                 AtomAst::Passes(s, sp) => Crisp::Atom(f::Atom::Passes(*s, self.sp(sp, env)?)),
@@ -935,10 +1209,32 @@ impl<'a> Elab<'a> {
             SpAst::Out { subj, payload, ptimbre, carry } => Sp::Out {
                 subj: self.npat(subj, env)?,
                 payload: Box::new(self.sp(payload, env)?),
-                ptimbre: ptimbre.as_ref().map(|t| self.timbre(t, env)).transpose()?,
-                carry: carry.as_ref().map(|d| self.datum(d, env, None)).transpose()?,
+                ptimbre: self.pat_timbre(ptimbre, env)?,
+                carry: self.pat_datum(carry, env)?,
             },
             SpAst::In { subj, body } => Sp::In { subj: self.npat(subj, env)?, body: Box::new(self.sp(body, env)?) },
+        })
+    }
+
+    fn pat_timbre(&self, p: &PatId, env: &Env) -> R<f::PatC<Timbre>> {
+        Ok(match p {
+            PatId::Any => f::PatC::Any,
+            PatId::Wild => f::PatC::Wild,
+            PatId::Id(id) => match env.get(&id.name) {
+                Some(Val::Timbre(Hat::Wild)) => f::PatC::Wild,
+                _ if id.name == "dead" => f::PatC::Is(Timbre::DEAD),
+                _ => f::PatC::Is(self.timbre(id, env)?),
+            },
+        })
+    }
+    fn pat_datum(&self, p: &PatId, env: &Env) -> R<f::PatC<Datum>> {
+        Ok(match p {
+            PatId::Any => f::PatC::Any,
+            PatId::Wild => f::PatC::Wild,
+            PatId::Id(id) => match self.hat_datum(&DecoId::Id(id.clone()), env, None)? {
+                Hat::Is(d) => f::PatC::Is(d),
+                Hat::Wild => f::PatC::Wild,
+            },
         })
     }
 
@@ -948,8 +1244,8 @@ impl<'a> Elab<'a> {
                 Some(q) => Some(Box::new(self.sp(q, env)?)),
                 None => None,
             },
-            timbre: n.timbre.as_ref().map(|t| self.timbre(t, env)).transpose()?,
-            datum: n.datum.as_ref().map(|d| self.datum(d, env, None)).transpose()?,
+            timbre: self.pat_timbre(&n.timbre, env)?,
+            datum: self.pat_datum(&n.datum, env)?,
         })
     }
 
@@ -993,5 +1289,8 @@ fn kind(v: &Val) -> &'static str {
         Val::Clause(_) => "clause",
         Val::Str(_) => "string",
         Val::Cont(_) => "continuation",
+        Val::Pitchset(_) => "pitch set",
+        Val::List(_) => "list",
+        Val::Tuple(_) => "tuple",
     }
 }

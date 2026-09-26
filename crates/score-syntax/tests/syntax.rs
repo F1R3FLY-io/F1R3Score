@@ -151,3 +151,120 @@ fn voice_same_arena_structural() {
     let (init2, _, _, _) = score_syntax::elab::elaborate_into(&f2, &s.alph, &mut arena, &mut clauses).unwrap();
     cmp(&arena, s.initial[0].1, init2[0].1, 0);
 }
+
+// ------------------------------------------------------------- revision 2
+
+const FOUR_HANDS: &str = r#"
+score FourHands
+import std
+pitches   { r, A2, E2, C3, E3, A3 }
+durations { q = 1/4, h = 1/2 }
+timbres   { piano = gm(0) on 1 }
+def P1 = base "P1"   def P2 = base "P2"
+play Keyboard(P1, piano, 1, {A2, E2, C3, E3, A3})
+   | Keyboard(P2, piano, 1, {A2, E2, C3, E3, A3})
+   | touch(P1, A3, q)!(0) ; touch(P1, C3, q)!(0) ; touch(P1, E3, q)!(0) ;
+       ( touch(P1, A3, h)!(0) | touch(P1, C3, h)!(0) | touch(P1, E3, h)!(0) ) ; 0
+   | touch(P2, A2, h)!(0) ; touch(P2, E2, h)!(0) ; 0
+"#;
+
+#[test]
+fn four_hands_parses_without_warnings_and_roundtrips() {
+    let s = load("fh.score", FOUR_HANDS, &mut NoFiles).unwrap_or_else(|e| panic!("{e}"));
+    assert!(s.warnings.is_empty(), "{:?}", s.warnings);
+    // keyloc, keycode and the acknowledgement locations print as builtins
+    let printed = print_score(&s);
+    assert!(printed.contains("keyloc(") && printed.contains("keycode(") && printed.contains("ackloc("));
+    assert!(!printed.contains("dead"), "the dead timbre never appears in printed user syntax");
+    roundtrip(FOUR_HANDS);
+}
+
+#[test]
+fn wildcards_general_names_and_sequencing_parse() {
+    let src = r#"
+pitches { r, C4 } durations { q = 1/4 } timbres { piano, vibes }
+play for (y <- <@base "K", _, C4>) { *y }
+   | <@base "K", piano, q>!(0)
+   | <@base "K", vibes, q>!(0, piano, _)
+   | @(base "J")!(0)
+"#;
+    let s = load("w.score", src, &mut NoFiles).unwrap_or_else(|e| panic!("{e}"));
+    roundtrip(src);
+    // `x!(Q)` passes the general name @Q
+    let printed = print_score(&s);
+    assert!(printed.contains("!(0)"), "{printed}");
+    // `;` binds more tightly than `|`: two players in parallel
+    let src2 = r#"
+import std
+pitches { r, C4, E4 } durations { q = 1/4 } timbres { piano }
+def P = base "P"
+play Keyboard(P, piano, 1, pitches-r) | touch(P, C4, q)!(0) ; touch(P, E4, q)!(0) ; 0 | touch(P, E4, q)!(0) ; 0
+"#;
+    load("s.score", src2, &mut NoFiles).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn the_dead_timbre_cannot_be_written_and_reserved_names_cannot_be_declared() {
+    let src = "pitches { r, C4 } durations { q = 1/4 } timbres { piano } play <@0, dead, q>!(0)";
+    let e = load("d.score", src, &mut NoFiles).err().unwrap();
+    assert!(e.msg.contains("dead"), "{e}");
+    let src = "pitches { r, C4 } durations { q = 1/4 } timbres { ctl } play 0";
+    let e = load("c.score", src, &mut NoFiles).err().unwrap();
+    assert!(e.msg.contains("reserved"), "{e}");
+}
+
+#[test]
+fn a_sequence_under_a_payload_is_rejected() {
+    let src = r#"
+import std
+pitches { r, C4 } durations { q = 1/4 } timbres { piano }
+def P = base "P"
+play <@base "S", piano, q>!(touch(P, C4, q)!(0) ; 0)
+"#;
+    let e = load("p.score", src, &mut NoFiles).err().unwrap();
+    assert!(e.msg.contains("payload"), "{e}");
+}
+
+#[test]
+fn open_subjects_are_linted() {
+    // a subject with datum `_` has no polarity
+    let src = "pitches { r, C4 } durations { q = 1/4 } timbres { piano } play for (_ <- <@0, piano, _>) { 0 } | <@0, piano, q>!(0)";
+    let s = load("l.score", src, &mut NoFiles).unwrap();
+    assert!(s.warnings.iter().any(|w| w.msg.contains("no polarity")), "{:?}", s.warnings);
+    // both timbres open with nothing else there
+    let src = "pitches { r, C4 } durations { q = 1/4 } timbres { piano } play for (_ <- <@0, _, C4>) { 0 } | <@0, _, q>!(0)";
+    let s = load("l2.score", src, &mut NoFiles).unwrap();
+    assert!(s.warnings.iter().any(|w| w.msg.contains("open")), "{:?}", s.warnings);
+    // revision 1's payload-timbre warning is withdrawn
+    let src = "pitches { r, C4 } durations { q = 1/4 } timbres { piano, vibes } play for (_ <- <@0, piano, C4>) { 0 } | <@0, piano, q>!(0, vibes, C4)";
+    let s = load("l3.score", src, &mut NoFiles).unwrap();
+    assert!(s.warnings.is_empty(), "{:?}", s.warnings);
+}
+
+#[test]
+fn patterns_distinguish_any_from_the_wildcard() {
+    use score_logic::*;
+    let src = r#"
+pitches { r, C4 } durations { q = 1/4 } timbres { piano }
+play for (_ <- <@0, piano, C4> where [passes(<?, ?, ?>!(true, _, _))] * [!carry(_)]) { 0 } | <@0, piano, q>!(0)
+"#;
+    let s = load("p.score", src, &mut NoFiles).unwrap_or_else(|e| panic!("{e}"));
+    roundtrip(src);
+    let mut a = s.arena;
+    let nil = a.nil();
+    let t = score_core::Hat::Is(score_core::Timbre(0));
+    let c4 = score_core::Hat::Is(s.alph.lookup_datum("C4").unwrap());
+    let general = a.send_general(a.quote(nil, t, c4), nil);
+    let decorated = a.send(a.quote(nil, t, c4), nil, t, c4);
+    let pat = Sp::Out {
+        subj: NamePat::any(),
+        payload: Box::new(Sp::True),
+        ptimbre: PatC::Wild,
+        carry: PatC::Wild,
+    };
+    let mut ev = Evaluator::new(&a, &s.alph);
+    assert!(ev.sp(&pat, general), "`_` matches a wildcard");
+    assert!(!ev.sp(&pat, decorated), "`_` matches only a wildcard");
+    let any = Sp::Out { subj: NamePat::any(), payload: Box::new(Sp::True), ptimbre: PatC::Any, carry: PatC::Any };
+    assert!(ev.sp(&any, general) && ev.sp(&any, decorated), "`?` matches both");
+}

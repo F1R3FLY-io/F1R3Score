@@ -1,0 +1,15 @@
+// T13: the 4-hands piano with a third player on the first keyboard (Example 9.5)
+score FourHandsAndAThird
+import std
+pitches   { r, A2, E2, C3, E3, A3 }
+durations { q = 1/4, h = 1/2 }
+timbres   { piano = gm(0) on 1 }
+
+def P1 = base "P1"   def P2 = base "P2"
+
+play Keyboard(P1, piano, 1, {A2, E2, C3, E3, A3})
+   | Keyboard(P2, piano, 1, {A2, E2, C3, E3, A3})
+   | touch(P1, A3, q)!(0) ; touch(P1, C3, q)!(0) ; touch(P1, E3, q)!(0) ;
+       ( touch(P1, A3, h)!(0) | touch(P1, C3, h)!(0) | touch(P1, E3, h)!(0) ) ; 0
+   | touch(P2, A2, h)!(0) ; touch(P2, E2, h)!(0) ; 0
+   | touch(P1, A3, q)!(0) ; 0

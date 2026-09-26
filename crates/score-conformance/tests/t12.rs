@@ -10,6 +10,11 @@ fn t12_twinkle_under_every_scheduler() {
         let mut e = engine(s, cfg, Sources::new(prng(0)));
         let (stop, evs) = run(&mut e, &Limits::default());
         assert_eq!(stop, Stop::Quiescent);
+        // every written note passes the general name @0
+        for (_, r) in evs.iter().flat_map(|ev| ev.records.iter()) {
+            assert_eq!(r.payload, e.arena.nil());
+            assert_eq!((r.ptimbre, r.carry), (score_core::Hat::Wild, score_core::Hat::Wild));
+        }
         assert!(evs.iter().all(|ev| ev.alternatives == 1), "every fitting has one candidate");
         let p = e.sorted_performance();
         assert_eq!(p.len(), 22);

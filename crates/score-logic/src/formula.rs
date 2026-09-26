@@ -3,21 +3,41 @@
 //! clauses valued in (R>=0, +, x, 0, 1) -- Paper II's two sorts with the atoms
 //! of Definition 3.1 of the note.
 
-use score_core::{Datum, Timbre, Q};
+use score_core::{Datum, Hat, Timbre, Q};
 use std::collections::BTreeMap;
 
-/// A pattern for a name `<n, tau, d>`: `None` components are `_`.
+/// A pattern for one decoration component: `?` matches anything, including a
+/// wildcard; `_` matches only a wildcard; a name matches only itself. So a
+/// formula can tell a general name from a decorated one.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub enum PatC<T> {
+    Any,
+    Wild,
+    Is(T),
+}
+
+impl<T: Copy + Eq> PatC<T> {
+    pub fn matches(self, v: Hat<T>) -> bool {
+        match self {
+            PatC::Any => true,
+            PatC::Wild => v.is_wild(),
+            PatC::Is(x) => v == Hat::Is(x),
+        }
+    }
+}
+
+/// A pattern for a name `<n, tau, d>`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct NamePat {
-    /// a spatial formula on the quoted location, or `_`
+    /// a spatial formula on the quoted location, or `?`
     pub quote: Option<Box<Sp>>,
-    pub timbre: Option<Timbre>,
-    pub datum: Option<Datum>,
+    pub timbre: PatC<Timbre>,
+    pub datum: PatC<Datum>,
 }
 
 impl NamePat {
     pub fn any() -> NamePat {
-        NamePat { quote: None, timbre: None, datum: None }
+        NamePat { quote: None, timbre: PatC::Any, datum: PatC::Any }
     }
 }
 
@@ -33,7 +53,7 @@ pub enum Sp {
     /// separating conjunction: the multiset of components splits in two
     Par(Box<Sp>, Box<Sp>),
     /// `out`: a single message `<n,tau,d>!(payload, ptimbre, carry)`
-    Out { subj: NamePat, payload: Box<Sp>, ptimbre: Option<Timbre>, carry: Option<Datum> },
+    Out { subj: NamePat, payload: Box<Sp>, ptimbre: PatC<Timbre>, carry: PatC<Datum> },
     /// `in`: a single receipt `for(<n,tau,d>) body`
     In { subj: NamePat, body: Box<Sp> },
 }
@@ -44,7 +64,9 @@ pub enum Sp {
 pub enum Atom {
     Pitch(u8, Datum),
     Dur(u8, Datum),
-    Carry(u8, Datum),
+    /// `carry(e)`: the carried datum is concrete and equals `e`; `carry(_)`:
+    /// it is open
+    Carry(u8, Hat<Datum>),
     /// carry and pitch are ordered pitches and ord(carry) - ord(pitch) = k
     Step(u8, i64),
     /// the location's quote satisfies the formula
@@ -214,27 +236,27 @@ impl Graded {
 
 // ------------------------------------------------------------ derived atoms
 
-/// `held(t) := at(<_,_,_>!(true, _, t))`
+/// `held(t) := at(<?,?,?>!(true, ?, t))`
 pub fn held(t: Datum) -> Crisp {
-    Crisp::Atom(Atom::At(out_carry(Sp::True, Some(t))))
+    Crisp::Atom(Atom::At(out_carry(Sp::True, PatC::Is(t))))
 }
-/// `prev(u) := at(<_,_,u>!true)`
+/// `prev(u) := at(<?,?,u>!true)`
 pub fn prev(u: Datum) -> Crisp {
     Crisp::Atom(Atom::At(Sp::Out {
-        subj: NamePat { quote: None, timbre: None, datum: Some(u) },
+        subj: NamePat { quote: None, timbre: PatC::Any, datum: PatC::Is(u) },
         payload: Box::new(Sp::True),
-        ptimbre: None,
-        carry: None,
+        ptimbre: PatC::Any,
+        carry: PatC::Any,
     }))
 }
-fn out_carry(payload: Sp, carry: Option<Datum>) -> Sp {
-    Sp::Out { subj: NamePat::any(), payload: Box::new(payload), ptimbre: None, carry }
+fn out_carry(payload: Sp, carry: PatC<Datum>) -> Sp {
+    Sp::Out { subj: NamePat::any(), payload: Box::new(payload), ptimbre: PatC::Any, carry }
 }
 /// `back(j, e)`: the record `j` levels into the past carries `e`.
 pub fn back(j: u32, e: Datum) -> Crisp {
-    let mut s = out_carry(Sp::True, Some(e));
+    let mut s = out_carry(Sp::True, PatC::Is(e));
     for _ in 0..j {
-        s = out_carry(s, None);
+        s = out_carry(s, PatC::Any);
     }
     Crisp::Atom(Atom::At(s))
 }
@@ -243,7 +265,7 @@ pub fn back(j: u32, e: Datum) -> Crisp {
 pub fn last_formula(m: &[Datum]) -> Sp {
     let mut s = Sp::True;
     for &a in m {
-        s = out_carry(s, Some(a));
+        s = out_carry(s, PatC::Is(a));
     }
     s
 }
@@ -254,7 +276,7 @@ pub fn last(m: &[Datum]) -> Crisp {
 /// `call[m1 .. mk]`: `last` skipping the outermost record (the pitch a handoff
 /// carries but never plays, Proposition 6.5).
 pub fn call(m: &[Datum]) -> Crisp {
-    Crisp::Atom(Atom::At(out_carry(last_formula(m), None)))
+    Crisp::Atom(Atom::At(out_carry(last_formula(m), PatC::Any)))
 }
 
 impl KeyFn {
@@ -263,7 +285,7 @@ impl KeyFn {
         match (self, v) {
             (KeyFn::Pitch(s), KeyVal::D(d)) => Crisp::Atom(Atom::Pitch(*s, d)),
             (KeyFn::Dur(s), KeyVal::D(d)) => Crisp::Atom(Atom::Dur(*s, d)),
-            (KeyFn::Carry(s), KeyVal::D(d)) => Crisp::Atom(Atom::Carry(*s, d)),
+            (KeyFn::Carry(s), KeyVal::D(d)) => Crisp::Atom(Atom::Carry(*s, Hat::Is(d))),
             (KeyFn::Prev, KeyVal::D(d)) => prev(d),
             (KeyFn::Held, KeyVal::D(d)) => held(d),
             (KeyFn::Step(s), KeyVal::I(k)) => Crisp::Atom(Atom::Step(*s, k)),

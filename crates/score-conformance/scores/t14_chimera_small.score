@@ -1,0 +1,12 @@
+// T14 (small, for the differential): the chimeric instrument, 90 open-timbre
+// eighths. The full T14 is generated in tests/instruments.rs.
+score ChimeraSmall
+import std
+pitches { r, C3, E3, A3 }
+durations { e = 1/8, q = 1/4, h = 1/2 }
+timbres { vibes = gm(11) on 1, strings = gm(48) on 2 }
+factor vibes_temper = table dur { e: 9, q: 1, h: 1 }
+factor strings_temper = table dur { e: 1, q: 1, h: 9 }
+def P = base "P"
+play ChimeraKeyboard(P, {A3, C3, E3}, [(vibes, vibes_temper), (strings, strings_temper)])
+   | touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; touch(P, A3, e)!(0) ; touch(P, C3, e)!(0) ; touch(P, E3, e)!(0) ; 0

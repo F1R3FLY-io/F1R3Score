@@ -1,8 +1,11 @@
 //! `score-engine`: runs a closed score. It knows nothing of voices, fans,
-//! hands, servers, machines or idioms (R-neutral): it generates candidates
-//! from the premises of COMM1/COMM2, forms contention sets, chooses a maximal
-//! matching with probability proportional to the product of its clause
-//! values, fires it, and keeps musical time. No I/O.
+//! keys, servers, keyboards, players, synchronous output, chimeras, machines
+//! or idioms (R-neutral): it matches receipts and messages on their subjects
+//! (locations equivalent, timbres meeting concretely, data of opposite
+//! polarity), forms contention sets, chooses a maximal matching with
+//! probability proportional to the product of its clause values, fires it,
+//! emits the records of the communications, and keeps musical time. Notes
+//! are read off records by the playback function `score_core::nu`. No I/O.
 
 pub mod explore;
 pub mod matching;
@@ -173,11 +176,19 @@ pub struct Note {
     pub dur: Datum,
 }
 
+impl Note {
+    /// The timed note of a record: its onset and `nu(record)`.
+    pub fn of_record(onset: &Q, r: &Record, alph: &Alphabets) -> Note {
+        let n = nu(r, alph).expect("every record the engine emits has a note (Prop. 2.10(i))");
+        Note { onset: onset.clone(), timbre: n.timbre, pitch: n.pitch, dur: n.dur }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event {
     pub step: u64,
     pub onset: Q,
-    /// structural key of the location: digest prefix and timbre
+    /// structural key of the location: a digest prefix of its quote
     pub loc: String,
     pub set_size: usize,
     pub alternatives: usize,
@@ -186,6 +197,12 @@ pub struct Event {
     pub digits: Vec<(String, u32)>,
     /// "none" (one alternative), "joint", "factored", "human", "replay"
     pub routing: String,
+    /// the records of the communications fired, with their onsets
+    pub records: Vec<(Q, Record)>,
+    /// structural keys (digest prefixes) of each record's location and
+    /// payload process, for the trace
+    pub record_keys: Vec<(String, String)>,
+    /// their notes, computed by playback (`nu`) from `records` and nothing else
     pub notes: Vec<Note>,
 }
 
@@ -277,6 +294,7 @@ impl Weigher for EngineWeigher<'_> {
         loc: Loc,
         clause: ClauseId,
         slots: &[SlotView],
+        records: &[Record],
         recv: u64,
         sends: &[u64],
     ) -> Result<Q, EngineError> {
@@ -294,6 +312,7 @@ impl Weigher for EngineWeigher<'_> {
         let cand = Cand {
             recv,
             sends: sends.to_vec(),
+            records: records.to_vec(),
             slots: slots.to_vec(),
             weight: Q::ONE,
             onset: Q::ZERO,
@@ -351,7 +370,7 @@ impl Engine {
         };
         let mut touched = BTreeSet::new();
         for (t, p) in initial {
-            e.soup.spawn(&e.arena, &e.alph, *p, t, None, &mut touched)?;
+            e.soup.spawn(&e.arena, &e.clauses, &e.alph, *p, t, None, &mut touched)?;
         }
         e.dirty = touched;
         Ok(e)
@@ -370,9 +389,15 @@ impl Engine {
         }
     }
 
+    /// A structural key of a process: a prefix of its id-independent digest.
+    pub fn proc_key(&mut self, p: ProcId) -> String {
+        let d = self.digester.proc(&self.arena, &self.clauses, p);
+        hex(&d)[..16].to_string()
+    }
+
     pub fn loc_key(&mut self, l: Loc) -> String {
         let d = self.digester.proc(&self.arena, &self.clauses, l.quote);
-        format!("{}:{}", &hex(&d)[..16], self.alph.timbre_name(l.timbre))
+        hex(&d)[..16].to_string()
     }
 
     fn refresh(&mut self) -> Result<(), EngineError> {
@@ -413,7 +438,13 @@ impl Engine {
             .map(|c| {
                 c.slots
                     .iter()
-                    .map(|s| format!("{} {} -> {}", self.alph.name(s.pitch), self.alph.name(s.dur), self.alph.name(s.carry)))
+                    .map(|s| {
+                        let carry = match s.carry {
+                            Hat::Is(d) => self.alph.name(d).to_string(),
+                            Hat::Wild => "_".into(),
+                        };
+                        format!("{} {} {} -> {}", self.alph.timbre_name(s.timbre), self.alph.name(s.pitch), self.alph.name(s.dur), carry)
+                    })
                     .collect::<Vec<_>>()
                     .join(" & ")
             })
@@ -439,12 +470,16 @@ impl Engine {
         let recv_is_pitch = self.alph.is_pitch(c0.slots[0].pitch)
             && set.cands.iter().all(|c| c.slots[0].pitch == c0.slots[0].pitch);
         // pitch-side and duration-side values of each candidate
+        if set.cands.iter().any(|c| c.slots[0].carry.is_wild()) {
+            return Ok(None);
+        }
         let side = |c: &Cand| -> (Datum, Datum) {
             let s = &c.slots[0];
+            let carry = s.carry.concrete().expect("checked concrete");
             if recv_is_pitch {
-                (s.carry, s.dur)
+                (carry, s.dur)
             } else {
-                (s.pitch, s.carry)
+                (s.pitch, carry)
             }
         };
         if set.cands.iter().any(|c| {
@@ -474,7 +509,7 @@ impl Engine {
         }
         let eval_prod = |fs: &[Graded], c: &Cand, arena: &Arena, alph: &Alphabets| -> Result<Q, EngineError> {
             let mut ev = score_logic::Evaluator::new(arena, alph);
-            let view = score_logic::View { timbre: loc.timbre, loc: loc.quote, slots: &c.slots };
+            let view = score_logic::View { timbre: c.slots[0].timbre, loc: loc.quote, slots: &c.slots };
             let mut acc = Q::ONE;
             for f in fs {
                 acc = acc.mul(&ev.graded(f, &view, &mut score_logic::LocalOnly));
@@ -536,11 +571,14 @@ impl Engine {
             .flat_map(|(l, v)| v.iter().enumerate().filter(|(_, s)| s.onset == tmin).map(move |(i, _)| (*l, i)))
             .collect();
         // scheduling
+        // the timbre of a set, for by-timbre scheduling, is its least
+        // candidate's note's timbre
         let mut keyed: Vec<([u8; 32], u16, usize, (Loc, usize))> = due
             .into_iter()
             .map(|(l, i)| {
                 let d = self.digester.proc(&self.arena, &self.clauses, l.quote);
-                (d, l.timbre.0, i, (l, i))
+                let t = self.sets[&l][i].cands[0].slots[0].timbre.0;
+                (d, t, i, (l, i))
             })
             .collect();
         keyed.sort();
@@ -623,8 +661,11 @@ impl Engine {
         }
         let matching: Vec<Cand> = alts[chosen].iter().map(|&i| set.cands[i].clone()).collect();
         let mut touched = BTreeSet::new();
-        let raw = self.soup.fire(&mut self.arena, &self.alph, loc, &matching, &mut touched)?;
-        let notes: Vec<Note> = raw.into_iter().map(|(onset, timbre, pitch, dur)| Note { onset, timbre, pitch, dur }).collect();
+        let records = self.soup.fire(&mut self.arena, &self.clauses, &self.alph, loc, &matching, &mut touched)?;
+        // playback: the notes are read off the records and nothing else
+        let notes: Vec<Note> = records.iter().map(|(t, r)| Note::of_record(t, r, &self.alph)).collect();
+        let record_keys: Vec<(String, String)> =
+            records.iter().map(|(_, r)| (self.proc_key(r.loc), self.proc_key(r.payload))).collect();
         if self.replay.is_some() && routing == "replay" {
             let r = &self.replay.as_ref().unwrap()[self.replay_pos];
             if r.notes != notes {
@@ -646,7 +687,11 @@ impl Engine {
                 if self.zero_run.1 > self.config.unproductive {
                     return Err(EngineError::new(
                         "unproductive",
-                        format!("more than {} consecutive zero-length notes at onset {}", self.config.unproductive, n.onset),
+                        format!(
+                            "more than {} consecutive zero-length notes at onset {} (last at location {loc_key}); \
+                             the note gives no syntactic productivity check yet (open thread 6)",
+                            self.config.unproductive, n.onset
+                        ),
                     ));
                 }
             }
@@ -671,6 +716,8 @@ impl Engine {
             chosen,
             digits,
             routing,
+            records,
+            record_keys,
             notes,
         }))
     }

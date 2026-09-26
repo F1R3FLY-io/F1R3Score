@@ -1,0 +1,23 @@
+// The chimeric instrument (Section 9.3, Example 9.7): every key of the
+// keyboard holds a vibraphone key and a string key. A player who leaves the
+// timbre open is heard mostly on vibes when playing detached eighths and
+// mostly on strings when playing sustained halves; the instrument chooses
+// its timbre at every touch, from how it is played. The last phrase names
+// its timbre in every touch, as on a synthesizer with a patch selected.
+score Chimera
+import std
+pitches   { r, A2, C3, E3, A3, C4, E4 }
+durations { e = 1/8, q = 1/4, h = 1/2 }
+timbres   { vibes = gm(11) on 1, strings = gm(48) on 2 }
+
+factor vibes_temper   = table dur { e: 9, q: 1, h: 1 }
+factor strings_temper = table dur { e: 1, q: 1, h: 9 }
+
+def P = base "P"
+
+play ChimeraKeyboard(P, pitches-r, [(vibes, vibes_temper), (strings, strings_temper)])
+   | touch(P, A3, e)!(0) ; touch(P, C4, e)!(0) ; touch(P, E4, e)!(0) ; touch(P, C4, e)!(0) ;
+     touch(P, A3, e)!(0) ; touch(P, C4, e)!(0) ; touch(P, E4, e)!(0) ; touch(P, C4, e)!(0) ;
+     touch(P, A3, h)!(0) ; touch(P, C4, h)!(0) ; touch(P, E4, h)!(0) ; touch(P, C4, h)!(0) ;
+     ( touch(P, A2, h)!(0) | touch(P, E3, h)!(0) ) ;
+     <@keyloc(P, A3), vibes, h>!(0) ; <@keyloc(P, C4), vibes, h>!(0) ; <@keyloc(P, E4), vibes, h>!(0) ; 0

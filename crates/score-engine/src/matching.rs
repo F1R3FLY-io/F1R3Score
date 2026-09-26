@@ -8,14 +8,17 @@ fn conflict(a: &Cand, b: &Cand) -> bool {
 }
 
 /// All maximal sets of pairwise non-contending candidates, as sorted index
-/// lists in lexicographic order. A star (all candidates share one receipt)
-/// takes the fast path: its maximal matchings are the single candidates.
+/// lists in lexicographic order. A star -- every candidate shares one
+/// receipt, or every candidate shares one message -- takes the fast path: its
+/// maximal matchings are the single candidates (R-matchings(i)). The second
+/// case is an open-timbre touch at a chimeric key: one message, several keys.
 pub fn maximal_matchings(cands: &[Cand], bound: usize) -> Result<Vec<Vec<usize>>, EngineError> {
     let n = cands.len();
     if n == 0 {
         return Ok(vec![]);
     }
-    if cands.iter().all(|c| c.recv == cands[0].recv) {
+    let shared_message = cands[0].sends.iter().any(|s| cands.iter().all(|c| c.sends.contains(s)));
+    if cands.iter().all(|c| c.recv == cands[0].recv) || shared_message {
         if n > bound {
             return Err(EngineError::alternatives(bound));
         }

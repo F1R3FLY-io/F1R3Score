@@ -12,6 +12,7 @@
 //! indices when the binder is closed. Levels never reach a run.
 
 use crate::alphabet::{Datum, Timbre};
+use crate::hat::Hat;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -36,16 +37,37 @@ pub enum Name {
     Var(u32),
     /// de Bruijn level (elaboration only)
     Lvl(u32),
-    /// the closed name <@proc, timbre, datum>
-    Quote { proc: ProcId, timbre: Timbre, datum: Datum },
+    /// the name <@proc, timbre, datum>; either decoration may be `_`
+    Quote { proc: ProcId, timbre: Hat<Timbre>, datum: Hat<Datum> },
 }
 
 impl Name {
-    pub fn quote(&self) -> Option<(ProcId, Timbre, Datum)> {
+    pub fn quote(&self) -> Option<(ProcId, Hat<Timbre>, Hat<Datum>)> {
         match *self {
             Name::Quote { proc, timbre, datum } => Some((proc, timbre, datum)),
             _ => None,
         }
+    }
+    /// The general name `@P = <@P, _, _>` (Definition 2.1).
+    pub fn general(proc: ProcId) -> Name {
+        Name::Quote { proc, timbre: Hat::Wild, datum: Hat::Wild }
+    }
+    /// A name with concrete decorations.
+    pub fn concrete(proc: ProcId, timbre: Timbre, datum: Datum) -> Name {
+        Name::Quote { proc, timbre: Hat::Is(timbre), datum: Hat::Is(datum) }
+    }
+}
+
+/// The instance order `x <= x'` of Definition 2.4: equivalent locations (equal
+/// ids, since terms are interned in normal form), and each decoration
+/// component of `x'` is `_` or equal to that of `x`. Used by matching and by
+/// nothing else; name equivalence is unchanged (Remark 2.6).
+pub fn instance_of(x: &Name, general: &Name) -> bool {
+    match (x, general) {
+        (Name::Quote { proc: p, timbre: t, datum: d }, Name::Quote { proc: q, timbre: u, datum: e }) => {
+            p == q && t.instance_of(*u) && d.instance_of(*e)
+        }
+        _ => false,
     }
 }
 
@@ -57,7 +79,7 @@ pub enum Proc {
     /// a receipt (one subject) or a join / chord receipt (several). It binds
     /// one name per subject: inside `body`, the i-th bound name is `Var(i)`.
     Recv { subjects: Box<[Name]>, clause: ClauseId, body: ProcId, label: Option<Label> },
-    Send { subj: Name, payload: ProcId, ptimbre: Timbre, carry: Datum },
+    Send { subj: Name, payload: ProcId, ptimbre: Hat<Timbre>, carry: Hat<Datum> },
     /// only on a variable: `*<@P,..>` normalises to `P`
     Drop(Name),
 }
@@ -203,7 +225,7 @@ impl Arena {
         assert!(!subjects.is_empty());
         self.intern(Proc::Recv { subjects: subjects.into_boxed_slice(), clause, body, label })
     }
-    pub fn send(&mut self, subj: Name, payload: ProcId, ptimbre: Timbre, carry: Datum) -> ProcId {
+    pub fn send(&mut self, subj: Name, payload: ProcId, ptimbre: Hat<Timbre>, carry: Hat<Datum>) -> ProcId {
         self.intern(Proc::Send { subj, payload, ptimbre, carry })
     }
     /// `*x`: normalises `*<@P,t,d>` to `P`.
@@ -213,8 +235,17 @@ impl Arena {
             _ => self.intern(Proc::Drop(n)),
         }
     }
-    pub fn quote(&self, proc: ProcId, timbre: Timbre, datum: Datum) -> Name {
+    pub fn quote(&self, proc: ProcId, timbre: Hat<Timbre>, datum: Hat<Datum>) -> Name {
         Name::Quote { proc, timbre, datum }
+    }
+    /// `x!(Q)`: a message passing the general name `@Q`.
+    pub fn send_general(&mut self, subj: Name, payload: ProcId) -> ProcId {
+        self.send(subj, payload, Hat::Wild, Hat::Wild)
+    }
+    /// Is `p` record-shaped, `<@H, t, v>!(H, t', c)`: a message whose payload is
+    /// the quote of its own subject's location (the shape of `Rec`)?
+    pub fn is_record_shaped(&self, p: ProcId) -> bool {
+        matches!(self.get(p), Proc::Send { subj: Name::Quote { proc, .. }, payload, .. } if proc == payload)
     }
 
     /// The parallel components of a normal form (empty for `0`).
@@ -256,7 +287,7 @@ impl Arena {
             // receipts on the dead timbre (bases) never run: leave them alone,
             // so that labelling never changes a location
             Proc::Recv { subjects, .. }
-                if subjects.iter().any(|n| matches!(n, Name::Quote { timbre: Timbre::DEAD, .. })) =>
+                if subjects.iter().any(|n| matches!(n, Name::Quote { timbre: Hat::Is(Timbre::DEAD), .. })) =>
             {
                 p
             }
@@ -394,14 +425,17 @@ mod tests {
     fn d(i: u16) -> Datum {
         Datum(i)
     }
-    const T: Timbre = Timbre(0);
+    const T: Hat<Timbre> = Hat::Is(Timbre(0));
+    fn h(d: Datum) -> Hat<Datum> {
+        Hat::Is(d)
+    }
 
     #[test]
     fn par_is_a_multiset() {
         let mut a = Arena::new();
         let n = a.nil();
-        let m1 = a.send(a.quote(n, T, d(0)), n, T, d(1));
-        let m2 = a.send(a.quote(n, T, d(1)), n, T, d(1));
+        let m1 = a.send(a.quote(n, T, h(d(0))), n, T, h(d(1)));
+        let m2 = a.send(a.quote(n, T, h(d(1))), n, T, h(d(1)));
         let p = a.par([m1, m2, n]);
         let q = a.par([n, m2, m1]);
         assert_eq!(p, q);
@@ -415,8 +449,8 @@ mod tests {
     fn drop_quote_normalises() {
         let mut a = Arena::new();
         let n = a.nil();
-        let m = a.send(a.quote(n, T, d(0)), n, T, d(1));
-        let dq = a.drop_name(a.quote(m, T, d(2)));
+        let m = a.send(a.quote(n, T, h(d(0))), n, T, h(d(1)));
+        let dq = a.drop_name(a.quote(m, T, h(d(2))));
         assert_eq!(dq, m);
     }
 
@@ -426,22 +460,22 @@ mod tests {
         let n = a.nil();
         // for (y <- <@0,T,0>) { *y | <@*y, T, 1>!(0, T, 1) } written with a level
         let dy = a.drop_name(Name::Lvl(0));
-        let s = a.send(Name::Quote { proc: dy, timbre: T, datum: d(1) }, n, T, d(1));
+        let s = a.send(Name::Quote { proc: dy, timbre: T, datum: h(d(1)) }, n, T, h(d(1)));
         let body = a.par([dy, s]);
         let closed = a.close(body, 0, 1);
         assert_eq!(a.lv(closed), 0);
         assert_eq!(a.fv(closed), 1);
-        let r = a.recv(vec![a.quote(n, T, d(0))], ClauseId::TRUE, closed, None);
+        let r = a.recv(vec![a.quote(n, T, h(d(0)))], ClauseId::TRUE, closed, None);
         assert!(a.is_closed(r));
         // alpha: the same text closed from a different level is identical
         let dy2 = a.drop_name(Name::Lvl(7));
-        let s2 = a.send(Name::Quote { proc: dy2, timbre: T, datum: d(1) }, n, T, d(1));
+        let s2 = a.send(Name::Quote { proc: dy2, timbre: T, datum: h(d(1)) }, n, T, h(d(1)));
         let body2 = a.par([dy2, s2]);
         assert_eq!(a.close(body2, 7, 1), closed);
         // instantiate with <@M, T, 2>
-        let m = a.send(a.quote(n, T, d(3)), n, T, d(3));
-        let inst = a.instantiate(closed, &[a.quote(m, T, d(2))]);
-        let s3 = a.send(a.quote(m, T, d(1)), n, T, d(1));
+        let m = a.send(a.quote(n, T, h(d(3))), n, T, h(d(3)));
+        let inst = a.instantiate(closed, &[a.quote(m, T, h(d(2)))]);
+        let s3 = a.send(a.quote(m, T, h(d(1))), n, T, h(d(1)));
         let expect = a.par([m, s3]);
         assert_eq!(inst, expect);
     }

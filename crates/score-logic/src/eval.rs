@@ -1,21 +1,38 @@
 //! Evaluation of clauses on candidate views (R-exact, R-pure).
 
 use crate::formula::*;
-use score_core::{Alphabets, Arena, Datum, Name, Proc, ProcId, Timbre, Q};
+use score_core::{nu, Alphabets, Arena, Datum, Hat, Name, Proc, ProcId, Record, Timbre, Q};
 
-/// One pattern of a candidate: the note it would emit, the datum carried
-/// forward and the process passed.
+/// One pattern of a candidate: the note it would emit (read off its
+/// prospective record by the playback function), the datum carried forward,
+/// the payload's timbre and the process passed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlotView {
+    /// the note's timbre: the meet of the two subjects' timbres
+    pub timbre: Timbre,
     pub pitch: Datum,
     pub dur: Datum,
-    pub carry: Datum,
+    /// kappa(c); may be open
+    pub carry: Hat<Datum>,
+    /// the payload's timbre; may be open. No atom reads it in this version.
+    pub ptimbre: Hat<Timbre>,
     pub passes: ProcId,
+}
+
+impl SlotView {
+    /// The view of one pattern, built from its prospective record by the same
+    /// playback function that renders performances (R-record), so that what
+    /// a clause sees as the note and what is heard cannot diverge.
+    pub fn of_record(r: &Record, alph: &Alphabets) -> Option<SlotView> {
+        let n = nu(r, alph)?;
+        Some(SlotView { timbre: n.timbre, pitch: n.pitch, dur: n.dur, carry: r.carry, ptimbre: r.ptimbre, passes: r.payload })
+    }
 }
 
 /// What a clause sees of a candidate (Definition 3.1 of the note).
 #[derive(Clone, Copy, Debug)]
 pub struct View<'a> {
+    /// the note's timbre (of the first pattern); always concrete
     pub timbre: Timbre,
     /// the quote of the location at which the candidate meets
     pub loc: ProcId,
@@ -66,21 +83,24 @@ impl<'a> Evaluator<'a> {
         match f {
             KeyFn::Pitch(s) => self.slot(v, s).map(|x| KeyVal::D(x.pitch)).unwrap_or(KeyVal::Undef),
             KeyFn::Dur(s) => self.slot(v, s).map(|x| KeyVal::D(x.dur)).unwrap_or(KeyVal::Undef),
-            KeyFn::Carry(s) => self.slot(v, s).map(|x| KeyVal::D(x.carry)).unwrap_or(KeyVal::Undef),
+            KeyFn::Carry(s) => match self.slot(v, s).map(|x| x.carry) {
+                Some(Hat::Is(d)) => KeyVal::D(d),
+                _ => KeyVal::Undef,
+            },
             KeyFn::Prev => match self.arena.get(v.loc) {
-                Proc::Send { subj: Name::Quote { datum, .. }, .. } => KeyVal::D(*datum),
+                Proc::Send { subj: Name::Quote { datum: Hat::Is(d), .. }, .. } => KeyVal::D(*d),
                 _ => KeyVal::Undef,
             },
             KeyFn::Held => match self.arena.get(v.loc) {
-                Proc::Send { carry, .. } => KeyVal::D(*carry),
+                Proc::Send { carry: Hat::Is(d), .. } => KeyVal::D(*d),
                 _ => KeyVal::Undef,
             },
             KeyFn::Step(s) => match self.slot(v, s) {
-                Some(x) => match (self.alph.ord(x.carry), self.alph.ord(x.pitch)) {
+                Some(SlotView { carry: Hat::Is(c), pitch, .. }) => match (self.alph.ord(*c), self.alph.ord(*pitch)) {
                     (Some(c), Some(p)) => KeyVal::I(c - p),
                     _ => KeyVal::Undef,
                 },
-                None => KeyVal::Undef,
+                _ => KeyVal::Undef,
             },
         }
     }
@@ -174,9 +194,7 @@ impl<'a> Evaluator<'a> {
             Sp::Out { subj, payload, ptimbre, carry } => match self.arena.get(p) {
                 Proc::Send { subj: n, payload: pl, ptimbre: pt, carry: c } => {
                     let (n, pl, pt, c) = (*n, *pl, *pt, *c);
-                    ptimbre.map_or(true, |t| t == pt)
-                        && carry.map_or(true, |d| d == c)
-                        && self.name(subj, n)
+                    ptimbre.matches(pt) && carry.matches(c) && self.name(subj, n)
                         && self.sp(payload, pl)
                 }
                 _ => false,
@@ -194,12 +212,12 @@ impl<'a> Evaluator<'a> {
     fn name(&mut self, pat: &NamePat, n: Name) -> bool {
         match n {
             Name::Quote { proc, timbre, datum } => {
-                pat.timbre.map_or(true, |t| t == timbre)
-                    && pat.datum.map_or(true, |d| d == datum)
+                pat.timbre.matches(timbre)
+                    && pat.datum.matches(datum)
                     && pat.quote.as_ref().map_or(true, |q| self.sp(q, proc))
             }
-            // an open name (inside quoted code) matches only the wildcard
-            _ => pat.quote.is_none() && pat.timbre.is_none() && pat.datum.is_none(),
+            // a bound name (inside quoted code) matches only `<?, ?, ?>`
+            _ => pat.quote.is_none() && pat.timbre == PatC::Any && pat.datum == PatC::Any,
         }
     }
 

@@ -1,5 +1,7 @@
-//! Congruence property test: interning agrees with an independent decision
-//! procedure on 10^4 random term pairs, including `*@P` and alpha-variants.
+//! Congruence property test (R-nf): interning agrees with an independent
+//! decision procedure on 10^4 random term pairs with wildcard decorations,
+//! including `*@P` and alpha-variants; and Proposition 2.5 (the round trip)
+//! holds on them, while `@*x` is never identified with `x` (Remark 2.6).
 
 use score_core::*;
 
@@ -8,13 +10,26 @@ enum T {
     Nil,
     Par(Vec<T>),
     Recv(N, String, Box<T>),
-    Send(N, Box<T>, u16),
+    Send(N, Box<T>, Dc),
     Drop(N),
 }
 #[derive(Clone, Debug)]
 enum N {
     Var(String),
-    Quote(Box<T>, u16),
+    Quote(Box<T>, Dc),
+}
+
+/// A decoration: timbre and datum, `None` for the wildcard.
+type Dc = (Option<u16>, Option<u16>);
+
+fn gen_dc(r: &mut Rng) -> Dc {
+    let t = if r.below(3) == 0 { None } else { Some(r.below(2) as u16) };
+    let d = if r.below(4) == 0 { None } else { Some(r.below(3) as u16) };
+    (t, d)
+}
+fn show_dc(d: &Dc) -> String {
+    let f = |x: Option<u16>| x.map(|v| v.to_string()).unwrap_or_else(|| "_".into());
+    format!("{},{}", f(d.0), f(d.1))
 }
 
 struct Rng(u64);
@@ -47,7 +62,7 @@ fn gen(r: &mut Rng, depth: u32, scope: &mut Vec<String>) -> T {
         }
         _ => {
             let x = gen_name(r, depth - 1, scope);
-            T::Send(x, Box::new(gen(r, depth - 1, scope)), r.below(3) as u16)
+            T::Send(x, Box::new(gen(r, depth - 1, scope)), gen_dc(r))
         }
     }
 }
@@ -55,7 +70,7 @@ fn gen_name(r: &mut Rng, depth: u32, scope: &mut Vec<String>) -> N {
     if !scope.is_empty() && r.below(2) == 0 {
         N::Var(scope[r.below(scope.len() as u64) as usize].clone())
     } else {
-        N::Quote(Box::new(gen(r, depth, scope)), r.below(3) as u16)
+        N::Quote(Box::new(gen(r, depth, scope)), gen_dc(r))
     }
 }
 
@@ -87,7 +102,7 @@ fn variant(r: &mut Rng, t: &T, ren: &mut Vec<(String, String)>) -> T {
         T::Drop(x) => T::Drop(vname(r, x, ren)),
     };
     if r.below(4) == 0 {
-        T::Drop(N::Quote(Box::new(out), r.below(3) as u16))
+        T::Drop(N::Quote(Box::new(out), gen_dc(r)))
     } else {
         out
     }
@@ -101,7 +116,12 @@ fn vname(r: &mut Rng, n: &N, ren: &mut Vec<(String, String)>) -> N {
 
 // ------------------------------------------------ the arena construction
 
-const TB: Timbre = Timbre(0);
+fn hat_t(x: Option<u16>) -> Hat<Timbre> {
+    x.map(|v| Hat::Is(Timbre(v))).unwrap_or(Hat::Wild)
+}
+fn hat_d(x: Option<u16>) -> Hat<Datum> {
+    x.map(|v| Hat::Is(Datum(v))).unwrap_or(Hat::Wild)
+}
 
 fn build(a: &mut Arena, t: &T, env: &mut Vec<String>) -> ProcId {
     match t {
@@ -122,7 +142,7 @@ fn build(a: &mut Arena, t: &T, env: &mut Vec<String>) -> ProcId {
         T::Send(x, p, d) => {
             let n = bname(a, x, env);
             let pl = build(a, p, env);
-            a.send(n, pl, TB, Datum(*d))
+            a.send(n, pl, hat_t(d.0), hat_d(d.1))
         }
         T::Drop(x) => {
             let n = bname(a, x, env);
@@ -135,7 +155,7 @@ fn bname(a: &mut Arena, n: &N, env: &mut Vec<String>) -> Name {
         N::Var(v) => Name::Lvl(env.iter().rposition(|x| x == v).unwrap() as u32),
         N::Quote(p, d) => {
             let q = build(a, p, env);
-            Name::Quote { proc: q, timbre: TB, datum: Datum(*d) }
+            Name::Quote { proc: q, timbre: hat_t(d.0), datum: hat_d(d.1) }
         }
     }
 }
@@ -159,7 +179,7 @@ fn canon(t: &T, env: &mut Vec<String>) -> Vec<String> {
             env.pop();
             vec![format!("R[{n}]{{{body}}}")]
         }
-        T::Send(x, p, d) => vec![format!("S[{}]({}){d}", cname(x, env), join(canon(p, env)))],
+        T::Send(x, p, d) => vec![format!("S[{}]({}){}", cname(x, env), join(canon(p, env)), show_dc(d))],
         T::Drop(N::Quote(p, _)) => canon(p, env),
         T::Drop(N::Var(v)) => vec![format!("D{}", env.len() - 1 - env.iter().rposition(|x| x == v).unwrap())],
     }
@@ -171,7 +191,7 @@ fn join(mut v: Vec<String>) -> String {
 fn cname(n: &N, env: &mut Vec<String>) -> String {
     match n {
         N::Var(v) => format!("v{}", env.len() - 1 - env.iter().rposition(|x| x == v).unwrap()),
-        N::Quote(p, d) => format!("q{}{d}", join(canon(p, env))),
+        N::Quote(p, d) => format!("q{}{}", join(canon(p, env)), show_dc(d)),
     }
 }
 
@@ -189,8 +209,9 @@ fn interning_decides_congruence() {
                 // a near miss: a variant with one datum or one binder use changed
                 let v = variant(&mut r, &t1, &mut vec![]);
                 match v {
-                    T::Send(x, p, d) => T::Send(x, p, (d + 1) % 3),
-                    other => T::Par(vec![other, T::Send(N::Quote(Box::new(T::Nil), 0), Box::new(T::Nil), 0)]),
+                    // flip one decoration component between concrete and `_`
+                    T::Send(x, p, (t, d)) => T::Send(x, p, (t, if d.is_some() { None } else { Some(0) })),
+                    other => T::Par(vec![other, T::Send(N::Quote(Box::new(T::Nil), (Some(0), Some(0))), Box::new(T::Nil), (None, None))]),
                 }
             }
         };
@@ -204,4 +225,42 @@ fn interning_decides_congruence() {
         }
     }
     assert!(eq > 3000 && ne > 3000, "both outcomes exercised: {eq} equal, {ne} different");
+}
+
+#[test]
+fn the_round_trip_is_an_instance_relation_not_an_equation() {
+    let mut r = Rng(0xD1B54A32D192ED03);
+    let mut a = Arena::new();
+    let mut distinct = 0;
+    for _ in 0..10_000 {
+        let t = gen(&mut r, 4, &mut vec![]);
+        let p = build(&mut a, &t, &mut vec![]);
+        if !a.is_closed(p) {
+            continue;
+        }
+        let dc = gen_dc(&mut r);
+        let x = Name::Quote { proc: p, timbre: hat_t(dc.0), datum: hat_d(dc.1) };
+        let dropped = a.drop_name(x);
+        let general = Name::general(dropped);
+        // Proposition 2.5: x <= @*x ...
+        assert!(instance_of(&x, &general));
+        // ... @*x is the greatest name at x's location: every decoration at
+        // that location is an instance of it, and it is an instance only of
+        // itself
+        for (u, v) in [(None, None), (Some(0), None), (None, Some(1)), (Some(1), Some(2))] {
+            let y = Name::Quote { proc: dropped, timbre: hat_t(u), datum: hat_d(v) };
+            assert!(instance_of(&y, &general));
+            if y != general {
+                assert!(!instance_of(&general, &y));
+            }
+        }
+        // ... and *@*x == *x
+        assert_eq!(a.drop_name(general), dropped);
+        // Remark 2.6: @*x is not identified with x unless x is itself general
+        if dc != (None, None) {
+            assert_ne!(general, x);
+            distinct += 1;
+        }
+    }
+    assert!(distinct > 5000);
 }

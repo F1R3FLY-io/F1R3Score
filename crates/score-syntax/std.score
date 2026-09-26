@@ -2,27 +2,37 @@
 //
 // Everything here is written in the surface syntax and elaborates to terms of
 // the core calculus; the engine knows nothing of it (R-neutral). Section and
-// definition numbers refer to "Scores as Processes" (publications/f1r3score).
-// The pitch `r` (the rest) and the duration `eps` (the null duration) are
-// resolved against the importing score's alphabets.
+// definition numbers refer to "Scores as Processes" (publications/f1r3score,
+// second version as of commit 5740fe9). The pitch `r` (the rest) and the
+// duration `eps` (the null duration) are resolved against the importing
+// score's alphabets.
+//
+// Names: `<@P, t, d>` with `_` for an open component; `@P` is the general name
+// `<@P, _, _>`; `x!(Q)` passes the general name `@Q`.
 
 // ---------------------------------------------------------------- written notes
 
-// A written note (Section 2.5): a hand on the channel for p and a message on
-// the co-channel for d, both at L. They meet by COMM1 and emit (tau, p, d).
+// A written note (Section 2.5): a key on the channel for p and a touch on the
+// co-channel for d, both at L. They meet by COMM1 and play (tau, p, d). The
+// touch passes the general name @0.
 def N(L: proc, tau: timbre, p: pitch, d: dur; K: proc) =
-  for (_ <- <@L, tau, p>) { K } | <@L, tau, d>!(0, tau, r)
+  for (_ <- <@L, tau, p>) { K } | <@L, tau, d>!(0)
 
 // `line(L, tau) [ p d, ... ] then K` is a derived form of the parser that
 // elaborates to a right-nested chain of N.
 
 // ------------------------------------------------------------------ the step
 
-// Record, fan, seed (Definition 5.1). Only the location of x is used.
+// Record, fan, seed (Definition 5.1). Only the location of x is used. The
+// record's decorations are concrete: the next step reads the carried pitch
+// through held(...).
 def Rec(x: name, tau: timbre, v: dur, t: pitch) = <@*x, tau, v>!(*x, tau, t)
 
-def Fan(x: name, tau: timbre) =
-  par v in durations+, t in pitches {
+// The fan over a pitch set (Section 3.3 of the spec): with `over = pitches` it
+// is Definition 5.1's fan. A fan over a subset is the same score as the full
+// fan with every pitch outside the subset given weight 0 by a crisp factor.
+def Fan(x: name, tau: timbre, over: pitchset) =
+  par v in durations+, t in over {
     <@*x, tau, v>!(Rec(x, tau, v, t), tau, t)
   }
 
@@ -30,44 +40,50 @@ def Fan(x: name, tau: timbre) =
 // is the first pitch.
 def Seed(B: proc, tau: timbre, p0: pitch, u0: dur) = <@B, tau, u0>!(B, tau, p0)
 
-// Step (Definition 5.2): every hand is offered and the clause keeps the one
+// Step (Definition 5.2): every key is offered and the clause keeps the one
 // holding the recorded pitch live.
-def Step(w: name, tau: timbre, psi: clause, K: cont) =
+def StepOver(w: name, tau: timbre, psi: clause, K: cont, over: pitchset) =
   par t in pitches {
     for (z <- <@*w, tau, t> where psi * [held(t)]) { K(z) }
   }
-  | Fan(w, tau)
+  | Fan(w, tau, over)
+
+def Step(w: name, tau: timbre, psi: clause, K: cont) = StepOver(w, tau, psi, K, pitches)
 
 // ------------------------------------------------ unbounded voices, reflectively
 
-// Section 4.2: the continuation asks for the next step; a server answers from
+// Section 5.2: the continuation asks for the next step; a server answers from
 // its own code, kept on a code channel and re-sent each time it is read. No
-// definition mentions itself.
-def Req(z: name, tau: timbre, BS: proc) = <@BS, tau, eps>!(*z, tau, r)
+// definition mentions itself. A request passes exactly the general name @*z of
+// the new location (Proposition 2.5), and the refresh receives @Server.
+def Req(z: name, tau: timbre, BS: proc) = <@BS, tau, eps>!(*z)
 
 def Refresh(tau: timbre, BC: proc) =
-  for (c <- <@BC, tau, r>) { *c | <@BC, tau, eps>!(*c, tau, r) }
+  for (c <- <@BC, tau, r>) { *c | <@BC, tau, eps>!(*c) }
 
-// A server whose live hand asks the server at BN for the next step. With
-// BN = BS it is the voice's own server; with another player's base it is one
-// half of a hocket.
-def ServerTo(tau: timbre, psi: clause, BS: proc, BC: proc, BN: proc) =
+// A server whose live key asks the server at BN, in timbre tauN, for the next
+// step. With BN = BS and tauN = tau it is the voice's own server; with the
+// other player's base and timbre it is one half of a hocket.
+def ServerTo(tau: timbre, psi: clause, BS: proc, BC: proc, BN: proc, tauN: timbre, over: pitchset) =
   for (w <- <@BS, tau, r>) {
-    Step(w, tau, psi, Req(_, tau, BN)) | Refresh(tau, BC)
+    StepOver(w, tau, psi, Req(_, tauN, BN), over) | Refresh(tau, BC)
   }
 
-def Server(tau: timbre, psi: clause, BS: proc, BC: proc) = ServerTo(tau, psi, BS, BC, BS)
+def Server(tau: timbre, psi: clause, BS: proc, BC: proc) = ServerTo(tau, psi, BS, BC, BS, tau, pitches)
 
-// The reflective voice (Proposition 4.4): a server, its code on the code
+// The reflective voice (Proposition 5.3): a server, its code on the code
 // channel, and a request carrying the seed. Bases are tag/S, tag/C and tag.
+def VoiceOver(tau: timbre, psi: clause, p0: pitch, u0: dur, tag: string, over: pitchset) =
+  ServerTo(tau, psi, base tag ++ "/S", base tag ++ "/C", base tag ++ "/S", tau, over)
+  | <@(base tag ++ "/C"), tau, eps>!(ServerTo(tau, psi, base tag ++ "/S", base tag ++ "/C", base tag ++ "/S", tau, over))
+  | <@(base tag ++ "/S"), tau, eps>!(Seed(base tag, tau, p0, u0))
+
 def Voice(tau: timbre, psi: clause, p0: pitch, u0: dur, tag: string) =
-  Server(tau, psi, base tag ++ "/S", base tag ++ "/C")
-  | <@(base tag ++ "/C"), tau, eps>!(Server(tau, psi, base tag ++ "/S", base tag ++ "/C"), tau, r)
-  | <@(base tag ++ "/S"), tau, eps>!(Seed(base tag, tau, p0, u0), tau, r)
+  VoiceOver(tau, psi, p0, u0, tag, pitches)
 
 // ------------------------------------------------------ the dual: rhythm leads
 
-// Hands on duration co-channels, fan of pitch channels (COMM2): the duration
+// Keys on duration co-channels, fan of pitch channels (COMM2): the duration
 // is chosen a note early and carried. Clauses read prev/pitch for pitch and
 // dur/carry for duration (machine pitch dual, machine dur dual).
 def DualRec(x: name, tau: timbre, t: pitch, v: dur) = <@*x, tau, t>!(*x, tau, v)
@@ -92,32 +108,35 @@ def DualServer(tau: timbre, psi: clause, BS: proc, BC: proc) =
 
 def DualVoice(tau: timbre, psi: clause, p0: pitch, u0: dur, tag: string) =
   DualServer(tau, psi, base tag ++ "/S", base tag ++ "/C")
-  | <@(base tag ++ "/C"), tau, eps>!(DualServer(tau, psi, base tag ++ "/S", base tag ++ "/C"), tau, r)
-  | <@(base tag ++ "/S"), tau, eps>!(DualSeed(base tag, tau, p0, u0), tau, r)
+  | <@(base tag ++ "/C"), tau, eps>!(DualServer(tau, psi, base tag ++ "/S", base tag ++ "/C"))
+  | <@(base tag ++ "/S"), tau, eps>!(DualSeed(base tag, tau, p0, u0))
 
 // ------------------------------------------------------------ alternation
 
-// Hocket (Section 6.5): two players share a timbre and a line; each player's
-// live hand asks the OTHER player's server for the next step, so their notes
-// interleave note for note while each clause adds its player's preferences.
-def HocketA(tau: timbre, psiA: clause, tag: string) =
-  ServerTo(tau, psiA, base tag ++ "/A/S", base tag ++ "/A/C", base tag ++ "/B/S")
-  | <@(base tag ++ "/A/C"), tau, eps>!(
-      ServerTo(tau, psiA, base tag ++ "/A/S", base tag ++ "/A/C", base tag ++ "/B/S"), tau, r)
+// Hocket (Section 7.4): two players share one line; each player's live key
+// asks the OTHER player's server, in that player's timbre, for the next step,
+// so their notes interleave note for note while each clause adds its player's
+// preferences. The timbres may differ: a step builds its keys and fan from the
+// location alone, in its own player's timbre, and the request passes the
+// general name, so the line passes between instruments note by note.
+def HocketA(tauA: timbre, psiA: clause, tauB: timbre, tag: string) =
+  ServerTo(tauA, psiA, base tag ++ "/A/S", base tag ++ "/A/C", base tag ++ "/B/S", tauB, pitches)
+  | <@(base tag ++ "/A/C"), tauA, eps>!(
+      ServerTo(tauA, psiA, base tag ++ "/A/S", base tag ++ "/A/C", base tag ++ "/B/S", tauB, pitches))
 
-def HocketB(tau: timbre, psiB: clause, tag: string) =
-  ServerTo(tau, psiB, base tag ++ "/B/S", base tag ++ "/B/C", base tag ++ "/A/S")
-  | <@(base tag ++ "/B/C"), tau, eps>!(
-      ServerTo(tau, psiB, base tag ++ "/B/S", base tag ++ "/B/C", base tag ++ "/A/S"), tau, r)
+def HocketB(tauB: timbre, psiB: clause, tauA: timbre, tag: string) =
+  ServerTo(tauB, psiB, base tag ++ "/B/S", base tag ++ "/B/C", base tag ++ "/A/S", tauA, pitches)
+  | <@(base tag ++ "/B/C"), tauB, eps>!(
+      ServerTo(tauB, psiB, base tag ++ "/B/S", base tag ++ "/B/C", base tag ++ "/A/S", tauA, pitches))
 
-// Both players, with player A playing first from the seed.
-def Hocket(tau: timbre, psiA: clause, psiB: clause, p0: pitch, u0: dur, tag: string) =
-  HocketA(tau, psiA, tag) | HocketB(tau, psiB, tag)
-  | <@(base tag ++ "/A/S"), tau, eps>!(Seed(base tag, tau, p0, u0), tau, r)
+// Both players, with player A playing first from the seed (in A's timbre).
+def Hocket(tauA: timbre, psiA: clause, tauB: timbre, psiB: clause, p0: pitch, u0: dur, tag: string) =
+  HocketA(tauA, psiA, tauB, tag) | HocketB(tauB, psiB, tauA, tag)
+  | <@(base tag ++ "/A/S"), tauA, eps>!(Seed(base tag, tauA, p0, u0))
 
 // ---------------------------------------------------------------- handoff
 
-// Call and response (Proposition 6.5). The caller's last live hand continues
+// Call and response (Proposition 7.5). The caller's last live key continues
 // with Call instead of a request: the fan is emitted at the rendezvous R in
 // the responder's timbre, and its records carry the caller's whole history.
 def Call(x: name, tauB: timbre, R: proc) =
@@ -130,12 +149,61 @@ def Call(x: name, tauB: timbre, R: proc) =
 def Resp(R: proc, tauB: timbre, pB: pitch, psiB: clause, BS: proc) =
   for (y <- <@R, tauB, pB> where psiB) { Req(y, tauB, BS) }
 
+// A responder that listens on <@R, _, pB> answers a call addressed in any
+// timbre; its first note sounds in the timbre the caller chose (Section 7.4),
+// and from then on it plays in its own timbre tauB.
+def RespAny(R: proc, tauB: timbre, pB: pitch, psiB: clause, BS: proc) =
+  for (y <- <@R, _, pB> where psiB) { Req(y, tauB, BS) }
+
 // A complete responder: Resp plus its own reflective server and code. The
 // first fitting happens at the rendezvous, whose location is a base: its
-// clause psiFirst reads the call through passes(...) (Proposition 6.5); from
+// clause psiFirst reads the call through passes(...) (Proposition 7.5); from
 // then on the responder's location holds the call as a sub-record and psiB
 // reads it with at(...), last[...] or call[...].
 def Responder(R: proc, tauB: timbre, pB: pitch, psiFirst: clause, psiB: clause, tag: string) =
   Resp(R, tauB, pB, psiFirst, base tag ++ "/S")
   | Server(tauB, psiB, base tag ++ "/S", base tag ++ "/C")
-  | <@(base tag ++ "/C"), tauB, eps>!(Server(tauB, psiB, base tag ++ "/S", base tag ++ "/C"), tauB, r)
+  | <@(base tag ++ "/C"), tauB, eps>!(Server(tauB, psiB, base tag ++ "/S", base tag ++ "/C"))
+
+// The same, answering a call in any timbre.
+def ResponderAny(R: proc, tauB: timbre, pB: pitch, psiFirst: clause, psiB: clause, tag: string) =
+  RespAny(R, tauB, pB, psiFirst, base tag ++ "/S")
+  | Server(tauB, psiB, base tag ++ "/S", base tag ++ "/C")
+  | <@(base tag ++ "/C"), tauB, eps>!(Server(tauB, psiB, base tag ++ "/S", base tag ++ "/C"))
+
+// ------------------------------------------------ musicians and instruments
+
+// Keys that re-arm themselves (Definition 9.1). A key belongs to the
+// instrument: a receipt holding a pitch, at its own location keyloc(P, k), in
+// the instrument's timbre. Struck, it runs the touch's payload and fetches its
+// own text from its code location, runs it and puts it back: one null note
+// per strike. Its text mentions only its two fixed locations, never itself.
+def KeyRefresh(P: proc, k: pitch, tau: timbre) =
+  for (c <- <@keycode(P, k, tau), tau, r>) { *c | <@keycode(P, k, tau), tau, eps>!(*c) }
+
+def Key(P: proc, k: pitch, tau: timbre, psi: clause) =
+  for (y <- <@keyloc(P, k), tau, k> where psi) { *y | KeyRefresh(P, k, tau) }
+
+def Installed(P: proc, k: pitch, tau: timbre, psi: clause) =
+  Key(P, k, tau, psi) | <@keycode(P, k, tau), tau, eps>!(Key(P, k, tau, psi))
+
+// A keyboard: every key of a pitch set installed on the base P. The 2n-hands
+// piano is n keyboards of `pitches { r, piano88 }`.
+def Keyboard(P: proc, tau: timbre, psi: clause, over: pitchset) =
+  par k in over { Installed(P, k, tau, psi) }
+
+// The chimeric instrument (Section 9.3): one key location holding a key per
+// timbre, each with its own clause. A touch that names a timbre meets only
+// that key; a touch that leaves the timbre open meets all of them, and their
+// clauses decide which timbre sounds.
+def Chimera(P: proc, k: pitch, voices: [(timbre, clause)]) =
+  par (tau, psi) in voices { Installed(P, k, tau, psi) }
+
+def ChimeraKeyboard(P: proc, over: pitchset, voices: [(timbre, clause)]) =
+  par k in over { Chimera(P, k, voices) }
+
+// A touch belongs to the player: a co-channel at a key location, holding a
+// duration, with the timbre left to the instrument. Write `touch(P, k, d)!(0)`
+// for a touch that passes @0, and `<@keyloc(P, k), vibes, d>` for one that
+// names its timbre. Join touches with `;` for synchronous output (Def. 9.3).
+def touch(P: proc, k: pitch, d: dur): name = <@keyloc(P, k), _, d>

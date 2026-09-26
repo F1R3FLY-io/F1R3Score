@@ -3,7 +3,7 @@
 use crate::ast::*;
 use crate::lexer::{lex, Diag, Span, Tok};
 use score_core::Q;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Supplies the text of imported files (`import "x.score"`) and imported
 /// machines (`machine pitch import "x.machine"`). The syntax crate performs
@@ -27,11 +27,16 @@ struct Parser<'l> {
     pos: usize,
     file: String,
     sigs: HashMap<String, Vec<Sort>>,
+    /// definitions that return a name
+    name_defs: HashSet<String>,
     params: HashMap<String, Sort>,
     factors: Vec<String>,
     loader: &'l mut dyn Loader,
     imported: Vec<String>,
     out: File,
+    /// > 0 while parsing definition arguments, where `;` separates arguments
+    /// rather than sequencing output
+    no_seq: u32,
 }
 
 type R<T> = Result<T, Diag>;
@@ -42,11 +47,13 @@ pub fn parse(file: &str, src: &str, loader: &mut dyn Loader) -> R<File> {
         pos: 0,
         file: file.into(),
         sigs: HashMap::new(),
+        name_defs: HashSet::new(),
         params: HashMap::new(),
         factors: vec![],
         loader,
         imported: vec![],
         out: File { file: file.into(), ..Default::default() },
+        no_seq: 0,
     };
     p.file_items()?;
     Ok(p.out)
@@ -194,6 +201,7 @@ impl<'l> Parser<'l> {
                     "timbres" => self.timbres()?,
                     "def" => self.def()?,
                     "factor" => self.factor()?,
+                    "pitchset" => self.pitchset_decl()?,
                     "play" => {
                         let sp = self.bump().1;
                         if self.out.play.is_some() {
@@ -248,8 +256,13 @@ impl<'l> Parser<'l> {
                 Tok::Eof => return Ok(()),
                 Tok::Ident(k) if k == "def" => self.def()?,
                 Tok::Ident(k) if k == "factor" => self.factor()?,
+                Tok::Ident(k) if k == "pitchset" => self.pitchset_decl()?,
                 Tok::Ident(k) if k == "import" => self.import()?,
-                t => return self.err(format!("an imported file may contain only `def`, `factor` and `import`, found {t}")),
+                t => {
+                    return self.err(format!(
+                        "an imported file may contain only `def`, `factor`, `pitchset` and `import`, found {t}"
+                    ))
+                }
             }
         }
     }
@@ -258,6 +271,10 @@ impl<'l> Parser<'l> {
         let sp = self.bump().1;
         self.expect_p("{")?;
         let v = self.sep_list("}", |p| {
+            if p.is_kw("piano88") {
+                let sp = p.bump().1;
+                return Ok(PitchEntry::Piano88(sp));
+            }
             if p.eat_kw("scale") {
                 let mut kind = p.ident()?.name;
                 while p.eat_p("-") {
@@ -338,6 +355,28 @@ impl<'l> Parser<'l> {
         Ok(())
     }
 
+    /// A parameter sort: `proc`, ..., `pitchset`, `[S]`, `(S1, S2, ...)`.
+    fn sort(&mut self) -> R<Sort> {
+        if self.eat_p("[") {
+            let s = self.sort()?;
+            self.expect_p("]")?;
+            return Ok(Sort::List(Box::new(s)));
+        }
+        if self.eat_p("(") {
+            let v = self.sep_list(")", |p| p.sort())?;
+            return Ok(Sort::Tuple(v));
+        }
+        let s = self.ident()?;
+        Sort::parse(&s.name).ok_or_else(|| Diag {
+            file: self.file.clone(),
+            span: s.span,
+            msg: format!(
+                "unknown sort `{}` (proc, name, timbre, pitch, dur, clause, cont, string, pitchset, [S], (S, ...))",
+                s.name
+            ),
+        })
+    }
+
     fn def(&mut self) -> R<()> {
         self.bump();
         let name = self.ident()?;
@@ -348,26 +387,13 @@ impl<'l> Parser<'l> {
                 msg: format!("`{}` is defined twice", name.name),
             });
         }
-        self.expect_p("(")?;
         let mut params: Vec<(Id, Sort)> = vec![];
-        if !self.eat_p(")") {
+        // `def P1 = base "P1"`: a definition without parameters
+        if self.eat_p("(") && !self.eat_p(")") {
             loop {
                 let pid = self.ident()?;
                 self.expect_p(":")?;
-                let s = self.ident()?;
-                let sort = match Sort::parse(&s.name) {
-                    Some(x) => x,
-                    None => {
-                        return Err(Diag {
-                            file: self.file.clone(),
-                            span: s.span,
-                            msg: format!(
-                                "unknown sort `{}` (proc, name, timbre, pitch, dur, clause, cont, string)",
-                                s.name
-                            ),
-                        })
-                    }
-                };
+                let sort = self.sort()?;
                 if params.iter().any(|(q, _)| q.name == pid.name) {
                     return Err(Diag {
                         file: self.file.clone(),
@@ -383,15 +409,41 @@ impl<'l> Parser<'l> {
                 break;
             }
         }
+        let returns_name = if self.eat_p(":") {
+            let s = self.ident()?;
+            if s.name != "name" {
+                return Err(Diag {
+                    file: self.file.clone(),
+                    span: s.span,
+                    msg: "a definition returns a process, or a name (`: name`)".into(),
+                });
+            }
+            true
+        } else {
+            false
+        };
         self.expect_p("=")?;
         // registering the signature first lets a recursive definition parse,
         // so that elaboration can reject it with the right diagnostic
-        self.sigs.insert(name.name.clone(), params.iter().map(|x| x.1).collect());
-        self.params = params.iter().map(|(i, s)| (i.name.clone(), *s)).collect();
-        let body = self.proc();
+        self.sigs.insert(name.name.clone(), params.iter().map(|x| x.1.clone()).collect());
+        if returns_name {
+            self.name_defs.insert(name.name.clone());
+        }
+        self.params = params.iter().map(|(i, s)| (i.name.clone(), s.clone())).collect();
+        let body = if returns_name { self.name_expr().map(DefBody::Name) } else { self.proc().map(DefBody::Proc) };
         self.params.clear();
         let body = body?;
         self.out.defs.push(Def { name, params, body, file: self.file.clone() });
+        Ok(())
+    }
+
+    fn pitchset_decl(&mut self) -> R<()> {
+        self.bump();
+        let name = self.ident()?;
+        self.expect_p("=")?;
+        self.expect_p("{")?;
+        let v = self.sep_list("}", |p| p.ident())?;
+        self.out.pitchsets.push((name, v));
         Ok(())
     }
 
@@ -408,11 +460,35 @@ impl<'l> Parser<'l> {
     // --------------------------------------------------------------- procs
 
     pub fn proc(&mut self) -> R<PExpr> {
-        let mut v = vec![self.proc_atom()?];
+        let mut v = vec![self.seq()?];
         while self.eat_p("|") {
-            v.push(self.proc_atom()?);
+            v.push(self.seq()?);
         }
         Ok(if v.len() == 1 { v.pop().unwrap() } else { PExpr::Par(v) })
+    }
+
+    /// `step ; rest`, right-associative and binding more tightly than `|`
+    /// (Def. 9.3). The step is one message, or a parenthesised parallel group
+    /// of messages.
+    fn seq(&mut self) -> R<PExpr> {
+        let sp = self.span();
+        let a = self.proc_atom()?;
+        if self.no_seq > 0 || !self.is_p(";") {
+            return Ok(a);
+        }
+        let step = match &a {
+            PExpr::Send { .. } => vec![a],
+            PExpr::Par(v) if v.iter().all(|x| matches!(x, PExpr::Send { .. })) => v.clone(),
+            _ => {
+                return self.err(
+                    "the left of `;` must be a message, or a parenthesised parallel group of messages \
+                     (synchronous output, Definition 9.3)",
+                )
+            }
+        };
+        self.bump();
+        let rest = self.seq()?;
+        Ok(PExpr::Seq { step, rest: Box::new(rest), span: sp })
     }
 
     fn proc_atom(&mut self) -> R<PExpr> {
@@ -424,7 +500,10 @@ impl<'l> Parser<'l> {
             }
             Tok::P("(") => {
                 self.bump();
-                let e = self.proc()?;
+                let saved = std::mem::replace(&mut self.no_seq, 0);
+                let e = self.proc();
+                self.no_seq = saved;
+                let e = e?;
                 self.expect_p(")")?;
                 Ok(e)
             }
@@ -433,7 +512,7 @@ impl<'l> Parser<'l> {
                 let n = self.name_expr()?;
                 Ok(PExpr::Drop(n))
             }
-            Tok::P("<") => {
+            Tok::P("<") | Tok::P("@") => {
                 let n = self.name_expr()?;
                 self.send_rest(n, sp)
             }
@@ -460,10 +539,41 @@ impl<'l> Parser<'l> {
                     Ok(PExpr::Base(self.str_expr()?))
                 }
                 "line" if !self.sigs.contains_key("line") => self.line(),
+                "keyloc" | "keycode" if !self.params.contains_key(&k) && !self.sigs.contains_key(&k) => {
+                    self.bump();
+                    self.expect_p("(")?;
+                    let p = self.proc()?;
+                    self.expect_p(",")?;
+                    let key = self.deco()?;
+                    let e = if k == "keycode" {
+                        self.expect_p(",")?;
+                        let tau = self.deco()?;
+                        PExpr::KeyCode { p: Box::new(p), k: key, tau, span: sp }
+                    } else {
+                        PExpr::KeyLoc { p: Box::new(p), k: key, span: sp }
+                    };
+                    self.expect_p(")")?;
+                    Ok(e)
+                }
+                "ackloc" if !self.params.contains_key(&k) && !self.sigs.contains_key(&k) => {
+                    self.bump();
+                    self.expect_p("(")?;
+                    let n = self.int()?;
+                    self.expect_p(")")?;
+                    Ok(PExpr::AckLoc(n))
+                }
                 _ => {
                     let id = self.ident()?;
                     if self.is_p("!") {
                         return self.send_rest(NExpr::Ident(id), sp);
+                    }
+                    if self.is_p("(") && self.name_defs.contains(&id.name) {
+                        let args = self.app_args(&id)?;
+                        return self.send_rest(NExpr::App { def: id, args }, sp);
+                    }
+                    if !self.is_p("(") && !self.params.contains_key(&id.name) && self.sigs.get(&id.name).map_or(false, |s| s.is_empty()) {
+                        // a definition without parameters: `P1`
+                        return Ok(PExpr::App { def: id, args: vec![], label: None });
                     }
                     if self.is_p("(") {
                         if self.params.get(&id.name) == Some(&Sort::Cont) {
@@ -483,16 +593,32 @@ impl<'l> Parser<'l> {
         }
     }
 
+    /// A decoration component: a name or `_`.
+    fn deco(&mut self) -> R<DecoId> {
+        if self.is_p("_") {
+            return Ok(DecoId::Wild(self.bump().1));
+        }
+        Ok(DecoId::Id(self.ident()?))
+    }
+
+    /// `!(Q, t, d)` or `!(Q)`, which passes the general name `@Q`.
     fn send_rest(&mut self, subj: NExpr, sp: Span) -> R<PExpr> {
         self.expect_p("!")?;
         self.expect_p("(")?;
-        let payload = self.proc()?;
-        self.expect_p(",")?;
-        let timbre = self.ident()?;
-        self.expect_p(",")?;
-        let datum = self.ident()?;
+        let saved = std::mem::replace(&mut self.no_seq, 0);
+        let payload = self.proc();
+        self.no_seq = saved;
+        let payload = payload?;
+        let deco = if self.eat_p(",") {
+            let timbre = self.deco()?;
+            self.expect_p(",")?;
+            let datum = self.deco()?;
+            Some((timbre, datum))
+        } else {
+            None
+        };
         self.expect_p(")")?;
-        Ok(PExpr::Send { subj, payload: Box::new(payload), timbre, datum, span: sp })
+        Ok(PExpr::Send { subj, payload: Box::new(payload), deco, span: sp })
     }
 
     fn for_expr(&mut self) -> R<PExpr> {
@@ -538,15 +664,29 @@ impl<'l> Parser<'l> {
     fn name_expr(&mut self) -> R<NExpr> {
         if self.eat_p("<") {
             self.expect_p("@")?;
-            let p = self.proc()?;
+            let saved = std::mem::replace(&mut self.no_seq, 0);
+            let p = self.proc();
+            self.no_seq = saved;
+            let p = p?;
             self.expect_p(",")?;
-            let timbre = self.ident()?;
+            let timbre = self.deco()?;
             self.expect_p(",")?;
-            let datum = self.ident()?;
+            let datum = self.deco()?;
             self.expect_p(">")?;
             return Ok(NExpr::Quote { proc: Box::new(p), timbre, datum });
         }
-        Ok(NExpr::Ident(self.ident()?))
+        if self.is_p("@") {
+            // the general name @P = <@P, _, _>
+            let sp = self.bump().1;
+            let p = self.proc_atom()?;
+            return Ok(NExpr::Quote { proc: Box::new(p), timbre: DecoId::Wild(sp), datum: DecoId::Wild(sp) });
+        }
+        let id = self.ident()?;
+        if self.is_p("(") && self.name_defs.contains(&id.name) {
+            let args = self.app_args(&id)?;
+            return Ok(NExpr::App { def: id, args });
+        }
+        Ok(NExpr::Ident(id))
     }
 
     fn str_expr(&mut self) -> R<SExpr> {
@@ -584,12 +724,19 @@ impl<'l> Parser<'l> {
             }
         };
         self.expect_p("(")?;
+        self.no_seq += 1;
+        let r = self.app_args_inner(def, &sig);
+        self.no_seq -= 1;
+        r
+    }
+
+    fn app_args_inner(&mut self, def: &Id, sig: &[Sort]) -> R<Vec<Arg>> {
         let mut args = vec![];
         for (i, s) in sig.iter().enumerate() {
             if i > 0 && !self.eat_p(",") && !self.eat_p(";") {
                 return self.err(format!("`{}` takes {} arguments; expected `,`", def.name, sig.len()));
             }
-            args.push(self.arg(*s)?);
+            args.push(self.arg(s)?);
         }
         if !self.is_p(")") {
             return self.err(format!("`{}` takes {} arguments", def.name, sig.len()));
@@ -598,15 +745,61 @@ impl<'l> Parser<'l> {
         Ok(args)
     }
 
-    fn arg(&mut self, s: Sort) -> R<Arg> {
+    fn pset(&mut self) -> R<PSet> {
+        if self.eat_p("{") {
+            return Ok(PSet::Lit(self.sep_list("}", |p| p.ident())?));
+        }
+        if self.eat_kw("pitches") {
+            if self.eat_p("-") {
+                self.expect_kw("r")?;
+                return Ok(PSet::PitchesR);
+            }
+            return Ok(PSet::Pitches);
+        }
+        Ok(PSet::Ref(self.ident()?))
+    }
+
+    fn arg(&mut self, s: &Sort) -> R<Arg> {
         if self.is_p("_") {
-            return Ok(Arg::Hole(self.bump().1));
+            let sp = self.bump().1;
+            return Ok(match s {
+                // the continuation's hole
+                Sort::Name => Arg::Hole(sp),
+                // a wildcard decoration
+                Sort::Timbre => Arg::Timbre(DecoId::Wild(sp)),
+                Sort::Pitch | Sort::Dur => Arg::Datum(DecoId::Wild(sp)),
+                _ => return Err(Diag { file: self.file.clone(), span: sp, msg: format!("`_` is not a {}", s.show()) }),
+            });
         }
         Ok(match s {
             Sort::Proc => Arg::Proc(self.proc()?),
             Sort::Name => Arg::Name(self.name_expr()?),
-            Sort::Timbre => Arg::Timbre(self.ident()?),
-            Sort::Pitch | Sort::Dur => Arg::Datum(self.ident()?),
+            Sort::Timbre => Arg::Timbre(DecoId::Id(self.ident()?)),
+            Sort::Pitch | Sort::Dur => Arg::Datum(DecoId::Id(self.ident()?)),
+            Sort::Pitchset => Arg::Pitchset(self.pset()?),
+            Sort::List(inner) => {
+                if matches!(self.peek(), Tok::Ident(_)) {
+                    // a list parameter passed on
+                    let id = self.ident()?;
+                    return Ok(Arg::Name(NExpr::Ident(id)));
+                }
+                let sp = self.expect_p("[")?;
+                let inner = (**inner).clone();
+                let v = self.sep_list("]", |p| p.arg(&inner))?;
+                Arg::List(v, sp)
+            }
+            Sort::Tuple(parts) => {
+                let sp = self.expect_p("(")?;
+                let mut v = vec![];
+                for (i, q) in parts.iter().enumerate() {
+                    if i > 0 {
+                        self.expect_p(",")?;
+                    }
+                    v.push(self.arg(q)?);
+                }
+                self.expect_p(")")?;
+                Arg::Tuple(v, sp)
+            }
             Sort::Clause => Arg::Clause(self.clause()?),
             Sort::Str => Arg::Str(self.str_expr()?),
             Sort::Cont => {
@@ -624,7 +817,11 @@ impl<'l> Parser<'l> {
     fn gens(&mut self) -> R<Vec<Gen>> {
         let mut v = vec![];
         loop {
-            let var = self.ident()?;
+            let (vars, tuple) = if self.eat_p("(") {
+                (self.sep_list(")", |p| p.ident())?, true)
+            } else {
+                (vec![self.ident()?], false)
+            };
             self.expect_kw("in")?;
             let set = if self.eat_kw("pitches") {
                 if self.eat_p("-") {
@@ -641,10 +838,16 @@ impl<'l> Parser<'l> {
                 }
             } else if self.eat_p("[") {
                 GenSet::List(self.sep_list("]", |p| p.ident())?)
+            } else if self.eat_p("{") {
+                GenSet::List(self.sep_list("}", |p| p.ident())?)
+            } else if matches!(self.peek(), Tok::Ident(_)) {
+                GenSet::Ref(self.ident()?)
             } else {
-                return self.err("expected `pitches`, `pitches-r`, `durations`, `durations+` or a list");
+                return self.err(
+                    "expected `pitches`, `pitches-r`, `durations`, `durations+`, a list, or a pitch set or list parameter",
+                );
             };
-            v.push(Gen { var, set });
+            v.push(Gen { vars, tuple, set });
             if self.eat_p(",") {
                 continue;
             }
@@ -862,12 +1065,19 @@ impl<'l> Parser<'l> {
                     "pitch" | "dur" | "carry" => {
                         let s = self.slot()?;
                         self.expect_p("(")?;
-                        let d = self.ident()?;
+                        let d = self.deco()?;
                         self.expect_p(")")?;
-                        match kw.as_str() {
-                            "pitch" => AtomAst::Pitch(s, d),
-                            "dur" => AtomAst::Dur(s, d),
-                            _ => AtomAst::Carry(s, d),
+                        match (kw.as_str(), d) {
+                            ("carry", d) => AtomAst::Carry(s, d),
+                            (_, DecoId::Wild(sp)) => {
+                                return Err(Diag {
+                                    file: self.file.clone(),
+                                    span: sp,
+                                    msg: format!("the note's {kw} is always concrete; `{kw}(_)` never holds"),
+                                })
+                            }
+                            ("pitch", DecoId::Id(d)) => AtomAst::Pitch(s, d),
+                            (_, DecoId::Id(d)) => AtomAst::Dur(s, d),
                         }
                     }
                     "step" => {
@@ -992,33 +1202,43 @@ impl<'l> Parser<'l> {
                 if self.eat_p("(") {
                     let payload = self.sp()?;
                     self.expect_p(",")?;
-                    let pt = self.opt_ident()?;
+                    let pt = self.patid()?;
                     self.expect_p(",")?;
-                    let carry = self.opt_ident()?;
+                    let carry = self.patid()?;
                     self.expect_p(")")?;
                     Ok(SpAst::Out { subj, payload: Box::new(payload), ptimbre: pt, carry })
                 } else {
                     let payload = self.sp_atom()?;
-                    Ok(SpAst::Out { subj, payload: Box::new(payload), ptimbre: None, carry: None })
+                    Ok(SpAst::Out { subj, payload: Box::new(payload), ptimbre: PatId::Any, carry: PatId::Any })
                 }
             }
             t => self.err(format!("expected a spatial formula, found {t}")),
         }
     }
-    fn opt_ident(&mut self) -> R<Option<Id>> {
-        if self.eat_p("_") {
-            Ok(None)
+    /// `?` matches any component, including a wildcard; `_` matches only a
+    /// wildcard.
+    fn patid(&mut self) -> R<PatId> {
+        if self.eat_p("?") {
+            Ok(PatId::Any)
+        } else if self.eat_p("_") {
+            Ok(PatId::Wild)
         } else {
-            Ok(Some(self.ident()?))
+            Ok(PatId::Id(self.ident()?))
         }
     }
     fn npat(&mut self) -> R<NPat> {
         self.expect_p("<")?;
-        let quote = if self.eat_p("_") { None } else { Some(Box::new(self.sp()?)) };
+        let quote = if self.eat_p("?") {
+            None
+        } else if self.is_p("_") {
+            return self.err("a location is never a wildcard: write `?` for any location");
+        } else {
+            Some(Box::new(self.sp()?))
+        };
         self.expect_p(",")?;
-        let timbre = self.opt_ident()?;
+        let timbre = self.patid()?;
         self.expect_p(",")?;
-        let datum = self.opt_ident()?;
+        let datum = self.patid()?;
         self.expect_p(">")?;
         Ok(NPat { quote, timbre, datum })
     }
@@ -1098,11 +1318,13 @@ pub fn parse_machine_file(file: &str, src: &str) -> Result<MachineBody, Diag> {
         pos: 0,
         file: file.into(),
         sigs: HashMap::new(),
+        name_defs: HashSet::new(),
         params: HashMap::new(),
         factors: vec![],
         loader: &mut nf,
         imported: vec![],
         out: File::default(),
+        no_seq: 0,
     };
     p.expect_kw("machine")?;
     let n = p.int()? as usize;

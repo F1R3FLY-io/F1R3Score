@@ -15,9 +15,21 @@ pub struct Datum(pub u16);
 pub struct Timbre(pub u16);
 
 impl Timbre {
-    /// The reserved timbre no message may use (tau_bot); bases listen on it.
+    /// The reserved dead timbre (tau_bot): bases listen on it and key
+    /// locations are built with it. Never rendered; user code cannot write it.
     pub const DEAD: Timbre = Timbre(u16::MAX);
+    /// The reserved control timbre (kappa) of synchronous output (Def. 9.3).
+    /// Never rendered.
+    pub const CTL: Timbre = Timbre(u16::MAX - 1);
+    /// Is this one of the two reserved, never-rendered timbres?
+    pub fn is_reserved(self) -> bool {
+        self == Timbre::DEAD || self == Timbre::CTL
+    }
 }
+
+/// Surface names that no declared pitch, duration or timbre may take: the
+/// wildcard and the surface names of the dead and control timbres.
+pub const RESERVED_NAMES: [&str; 3] = ["_", "dead", "ctl"];
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Polarity {
@@ -90,6 +102,13 @@ impl Alphabets {
                 )));
             }
         }
+        for r in RESERVED_NAMES {
+            if let Some(k) = seen.get(r) {
+                return Err(AlphabetError(format!(
+                    "`{r}` is reserved (the wildcard and the dead and control timbres) and cannot be declared as a {k}"
+                )));
+            }
+        }
         if seen.contains_key(EPS_NAME) {
             return Err(AlphabetError("`eps` is reserved for the null duration".into()));
         }
@@ -100,7 +119,7 @@ impl Alphabets {
         if pitches.len() + durations.len() + 1 >= u16::MAX as usize {
             return Err(AlphabetError("alphabet too large".into()));
         }
-        if timbres.len() >= u16::MAX as usize {
+        if timbres.len() >= (u16::MAX - 1) as usize {
             return Err(AlphabetError("too many timbres".into()));
         }
         for p in &pitches {
@@ -186,7 +205,9 @@ impl Alphabets {
     }
     pub fn timbre_name(&self, t: Timbre) -> &str {
         if t == Timbre::DEAD {
-            "<dead>"
+            "dead"
+        } else if t == Timbre::CTL {
+            "ctl"
         } else {
             &self.timbres[t.0 as usize].name
         }
@@ -200,8 +221,19 @@ impl Alphabets {
             .position(|d| d.name == name)
             .map(|i| Datum((self.pitches.len() + i) as u16))
     }
+    /// A declared timbre by name. The reserved timbres are not found here:
+    /// user code cannot name them.
     pub fn lookup_timbre(&self, name: &str) -> Option<Timbre> {
         self.timbres.iter().position(|t| t.name == name).map(|i| Timbre(i as u16))
+    }
+    /// A timbre by name including the reserved `dead` and `ctl` (for reading
+    /// traces, which record whatever timbre a note sounded in).
+    pub fn lookup_any_timbre(&self, name: &str) -> Option<Timbre> {
+        match name {
+            "dead" => Some(Timbre::DEAD),
+            "ctl" => Some(Timbre::CTL),
+            _ => self.lookup_timbre(name),
+        }
     }
     /// All pitches in declaration order (the `pitches` generator).
     pub fn all_pitches(&self) -> Vec<Datum> {
@@ -269,6 +301,12 @@ pub fn midi_name(m: u8, flats: bool) -> String {
     format!("{}{}", names[(m % 12) as usize], (m as i32) / 12 - 1)
 }
 
+/// `piano88`: the 88 keys of a piano, A0 (MIDI 21) to C8 (MIDI 108), named
+/// with sharps.
+pub fn piano88() -> Vec<PitchDecl> {
+    (21u8..=108).map(|m| PitchDecl { name: midi_name(m, false), midi: Some(m) }).collect()
+}
+
 /// Expand `scale KIND LO .. HI` to pitch declarations (inclusive).
 pub fn expand_scale(kind: &str, lo: &str, hi: &str) -> Result<Vec<PitchDecl>, String> {
     let steps: &[u8] = match kind {
@@ -309,6 +347,22 @@ mod tests {
         assert_eq!(scientific_midi("Bb2"), Some(46));
         assert_eq!(scientific_midi("A4"), Some(69));
         assert_eq!(scientific_midi("deg7"), None);
+    }
+    #[test]
+    fn piano_has_88_keys() {
+        let p = piano88();
+        assert_eq!(p.len(), 88);
+        assert_eq!(p[0].name, "A0");
+        assert_eq!(p[87].name, "C8");
+        assert_eq!(p[39].name, "C4");
+    }
+    #[test]
+    fn reserved_names_cannot_be_declared() {
+        let r = PitchDecl { name: "r".into(), midi: None };
+        for bad in ["dead", "ctl"] {
+            let t = TimbreDecl { name: bad.into(), program: None, channel: 1 };
+            assert!(Alphabets::new(vec![r.clone()], vec![], vec![t]).is_err());
+        }
     }
     #[test]
     fn scale() {

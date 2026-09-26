@@ -50,9 +50,9 @@ impl fmt::Display for Diag {
 }
 impl std::error::Error for Diag {}
 
-const PUNCTS: [&str; 30] = [
+const PUNCTS: [&str; 31] = [
     "<-", "->", "<>", "..", "++", "&&", "||", "(", ")", "{", "}", "[", "]", "<", ">", ",", ";", ":", "=",
-    "!", "|", "&", "*", "+", "-", "/", ".", "@", "#", "_",
+    "!", "|", "&", "*", "+", "-", "/", ".", "@", "#", "_", "?",
 ];
 
 pub fn lex(file: &str, src: &str) -> Result<Vec<(Tok, Span)>, Diag> {
