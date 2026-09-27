@@ -95,9 +95,9 @@ The five core crates perform no I/O (a test enforces this) and depend only on
 - enforcement without deadlock, using Viable_β; chords; the Twinkle and
   FourHands MIDI golden files.
 
-`run_differential.sh PUBLICATIONS/f1r3score` drives `skeinsim.py` with traces
-from the player on T1, T5, T12, T13 (with and without the third player, six
-schedules) and T14, and checks that both implementations emit the same
-records at every resolution.
+`run_differential.sh PUBLICATIONS/f1r3score [N]` drives `skeinsim.py` with
+traces from the player on T0–T8 and T10–T14, and on N random small scores
+(default 40), and checks that both implementations emit the same records at
+every resolution, null notes included.
 
 See `DESIGN.md` for decisions, deviations and what is and is not verified.

@@ -43,15 +43,48 @@ Enforcement: with `Viable_β` the voice plays 10⁴ notes with no violation and
 never falls silent; the window graph has 30 states. Without the factor, the
 same score deadlocks on every seed tried.
 
-Differential against `skeinsim.py` (revision of 26 September, 853 lines),
-`run_differential.sh`:
-- T1 and T5: 2,000 fittings each agree on notes, carried data, onsets and
-  numbers of alternatives.
-- T12: 22 notes in both implementations.
-- T13: all 24 resolutions agree, null notes included. T13 with the third
-  player: all 27 agree, under each of six schedules.
-- T14 (90 touches): all 270 resolutions agree, including the timbre every note
-  sounded in.
+Differential against `skeinsim.py` (revision of 26 September, 853 lines).
+`run_differential.sh PUBLICATIONS/f1r3score [N]` plays each score, then drives
+`skeinsim` with the player's recorded choices. At every resolution the two must
+emit the same records: notes, carried data (timbres for instruments), onsets
+and numbers of alternatives, null notes included.
+- Where the player uses `Voice`, the adapter uses `skeinsim`'s *reflective*
+  voice. So the two implementations also agree on every request and refresh,
+  each passing a general name.
+- Results:
+  - T0: 899 resolutions.
+  - T1: 5,999.
+  - T2: two voices, random schedule; 899.
+  - T3: in `max` and in `one` mode.
+  - T4: 600.
+  - T5: 2,000 musical fittings; `skeinsim` has no reflective dual voice.
+  - T6.
+  - T7, both instruments: 899 each.
+  - T8, all three idioms: 899–900 each.
+  - T10: 899.
+  - T11: 599.
+  - T12.
+  - T13: 24; with the third player, 27 under each of six schedules.
+  - T14: 270.
+  - 40 random small scores (one or two voices with random machines, or a
+    keyboard or chimera with random touches and random named or open
+    timbres): all agree.
+- T9 compares a table with its formula on views; it is not a run and has no
+  trace.
+- **How the adapter matches.**
+  - `skeinsim` orders alternatives and simultaneously due sets differently, so
+    each recorded choice is matched by the records it emits, not by index.
+  - The adapter keeps a one-to-one map between the player's locations (by
+    digest) and `skeinsim`'s.
+  - The stream that paid for a musical choice names the voice that made it.
+  - What remains are ties between records that are identical in every
+    compared field and differ only in the payload process, which the two
+    implementations represent incomparably (two players' identical touches,
+    two voices' identical requests). The adapter searches over those, at most
+    six per run here, and accepts only an assignment that reproduces the
+    whole trace.
+- **Sensitivity check.** Changing one carried pitch in a trace makes the
+  differential fail.
 
 ## Decisions taken where the spec left room
 
@@ -238,15 +271,15 @@ The digits are checked against known expansions, including 128 hex digits of
 
 ## Not verified here
 
-- **wasm32 build.** No wasm32 std is available on this machine. The five core
+- **wasm32 build.** No wasm32 std is available on this machine: Ubuntu does not
+  package one, `rustup` cannot reach `static.rust-lang.org` from it, and
+  `-Z build-std` needs nightly. The five core
   crates contain no I/O (enforced by a test), and CI builds them for
   `wasm32-unknown-unknown`.
 - **Live MIDI** compiles against ALSA but has not been tested on a MIDI device.
-- **Differential scope.** The differential covers T1, T5, T12, T13 and T14,
-  not T0, T2–T4 and T6–T11 or random small scores, as the spec asks.
-  `skeinsim`'s alternatives are ordered differently from the player's
-  canonical order, so the adapter identifies each recorded choice by the
-  records it emits, not by its index.
+- **Differential.** It runs as a script, not under `cargo test`, because it
+  needs a checkout of `publications` and Python. The spec's CI job should call
+  `run_differential.sh`.
 
 ## Performance
 
