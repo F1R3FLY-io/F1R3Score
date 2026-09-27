@@ -15,7 +15,7 @@ Phases follow revision 2 of the specification (26 September 2026).
 | P2 | Done. Atoms (including `carry(_)`), spatial formulae with `?` and `_`, tables (including `dur`), machines, exact weights, PRNG with interval decoding, macros and `par` comprehensions; T0, T1, T5, T7, T8, T9. |
 | P3 | Done. `std.score` voices with general-name requests, handoff with an open-timbre responder, cross-timbre hocket; stream labels; freshness collection restricted to record-shaped locations; T2, T10, T11; collection tests. |
 | P4 | Done. Keys, keyboards, chimeras, `touch`; synchronous output `;` with a fresh acknowledgement location per site; T13, T14; instrument tests. |
-| P5 | Done. MIDI writer (per-note timbre routing), spigot sources, factor routing, replay, live MIDI; T4, replay, MIDI goldens. Live MIDI compiles against ALSA but is untested on a device. |
+| P5 | Done. MIDI writer (per-note timbre routing), spigot sources, factor routing, replay, live MIDI; T4, replay, MIDI goldens. Live MIDI compiles against ALSA and CoreMIDI (macOS, 27 September); notes have not yet been sent to a device. |
 | P6 | Done within the stated fragment. `leads`, `<g>`, `nu`, `live`; chord receipts; enforcement and chord tests. |
 | P7 | Partial. The human chooser and the differential are done. The wasm32 build is not verified: this build machine has no wasm32 std, so it is a CI job. |
 

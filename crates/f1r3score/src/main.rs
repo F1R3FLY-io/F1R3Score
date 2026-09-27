@@ -21,6 +21,7 @@ usage:
   f1r3score replay TRACE --score SCORE [--midi FILE] [--bpm N] [--format table|json]
   f1r3score render TRACE [--midi FILE] [--bpm N] [--out FILE] [--format table|json] [--include-null]
                                      playback only: the notes are read off the trace's records
+  f1r3score ports                    list MIDI output ports for --live (built with --features live)
   f1r3score machine import FILE --kind pitch|dur [--dual] --score SCORE [--name NAME]
 
 play options:
@@ -38,7 +39,8 @@ play options:
   --out FILE             performance as JSON to FILE
   --include-null         include null notes (zero length) in the performance, for diagnosis
   --midi FILE  --bpm N   Standard MIDI File (default 120 bpm)
-  --live PORT            live MIDI output (built with --features live)
+  --live PORT            live MIDI output to the first port whose name contains PORT,
+                         ignoring case (built with --features live; see `f1r3score ports`)
   --quiet                no performance on stdout
 ";
 
@@ -305,7 +307,7 @@ fn main() {
                 writeln!(w, "{}", render::trace_header(&e, &digest, &score_file)).ok();
             }
             #[cfg(feature = "live")]
-            let mut live_out = live.map(|p| render::live::Live::open(&p, out.bpm).unwrap_or_else(|er| die(3, er)));
+            let mut live_out = live.map(|p| render::live::Live::open(&p, out.bpm, &e.alph).unwrap_or_else(|er| die(3, er)));
             #[cfg(not(feature = "live"))]
             if live.is_some() {
                 die(1, "this build has no live MIDI; rebuild with `--features live`");

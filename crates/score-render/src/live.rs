@@ -18,14 +18,32 @@ pub fn ports() -> Result<Vec<String>, String> {
 }
 
 impl Live {
-    pub fn open(port: &str, bpm: u32) -> Result<Live, String> {
+    /// Connect to the first output port whose name contains `port`, ignoring
+    /// case, and select each declared timbre's General MIDI program on its
+    /// channel, as the MIDI file writer does.
+    pub fn open(port: &str, bpm: u32, a: &Alphabets) -> Result<Live, String> {
         let out = midir::MidiOutput::new("f1r3score").map_err(|e| e.to_string())?;
         let ports = out.ports();
-        let p = ports
-            .iter()
-            .find(|p| out.port_name(p).map(|n| n.contains(port)).unwrap_or(false))
-            .ok_or_else(|| format!("no MIDI output port matching `{port}`"))?;
-        let conn = out.connect(p, "f1r3score").map_err(|e| e.to_string())?;
+        let want = port.to_lowercase();
+        let names: Vec<String> = ports.iter().map(|p| out.port_name(p).unwrap_or_default()).collect();
+        let Some(i) = names.iter().position(|n| n.to_lowercase().contains(&want)) else {
+            let listing = if names.is_empty() {
+                "there are no MIDI output ports at all: start the synthesizer with a MIDI input enabled, \
+                 then run `f1r3score ports`"
+                    .to_string()
+            } else {
+                format!("the output ports are:\n  {}", names.join("\n  "))
+            };
+            return Err(format!("no MIDI output port matching `{port}`; {listing}"));
+        };
+        let mut conn = out.connect(&ports[i], "f1r3score").map_err(|e| e.to_string())?;
+        for t in &a.timbres {
+            if let Some(prog) = t.program {
+                let ch = t.channel.saturating_sub(1) & 0x0f;
+                conn.send(&[0xC0 | ch, prog & 0x7f]).map_err(|e| e.to_string())?;
+            }
+        }
+        eprintln!("f1r3score: live MIDI to `{}`", names[i]);
         Ok(Live { conn, start: Instant::now(), bpm, pending: vec![] })
     }
 
@@ -35,8 +53,12 @@ impl Live {
     }
 
     /// Queue a note; release everything due up to `now_onset`.
+    /// Notes in the reserved dead and control timbres, and rests, are silent:
+    /// they only advance the clock.
     pub fn play(&mut self, n: &Note, a: &Alphabets) -> Result<(), String> {
-        let t = &a.timbres[n.timbre.0 as usize];
+        let Some(t) = a.timbres.get(n.timbre.0 as usize) else {
+            return self.flush(&n.onset);
+        };
         let ch = t.channel.saturating_sub(1) & 0x0f;
         if let Some(key) = a.midi(n.pitch) {
             if a.len(n.dur).is_positive() {
