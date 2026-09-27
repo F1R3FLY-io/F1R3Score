@@ -1,0 +1,1349 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1.05in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{charter}
+\usepackage[scaled=0.9]{helvet}
+\usepackage{courier}
+
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=black,urlcolor=blue]{hyperref}
+\usepackage{enumitem}
+\usepackage[protrusion=true,expansion=false]{microtype}
+\setlength{\emergencystretch}{3em}
+\DisableLigatures[-,<,>]{encoding = T1, family = tt*}
+\setlist{itemsep=2pt,topsep=4pt}
+
+% NOTATION RULES (as in the note and the spec): the rho calculus is never
+% written with the Greek letter; quoting is @P, dropping is *x.
+\newcommand{\rhoc}{\textsf{rho}}
+\newcommand{\nm}[3]{\langle @#1,\,#2,\,#3\rangle}
+\newcommand{\tool}{\texttt{f1r3score}}
+\newcommand{\ttx}[1]{\texttt{#1}}
+
+\definecolor{codebg}{gray}{0.96}
+\definecolor{notebg}{rgb}{0.97,0.95,0.88}
+\lstdefinelanguage{score}{
+  morekeywords={score,pitches,durations,timbres,def,factor,machine,table,
+    for,where,par,in,at,play,line,then,import,pitchset,base,keyloc,keycode,
+    proc,name,timbre,pitch,dur,clause,cont,string,true,false,nu,mu,held,carry,
+    prev,step,back,last,call,passes,leads,live,any,all,sum,uniform,dual,scale,
+    gm,on,piano88},
+  sensitive=true,
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  morestring=[b]",
+}
+\lstdefinelanguage{Rust}{
+  morekeywords={pub,struct,enum,impl,fn,trait,let,mut,use,for,where,self,Self,
+    Box,Vec,Result,Ok,Err,Some,None,match,if,else,return,mod},
+  sensitive=true, morecomment=[l]{//}, morestring=[b]",
+}
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=none,
+  keywordstyle=\bfseries,
+  commentstyle=\itshape\color{black!60},
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  xleftmargin=6pt,
+  aboveskip=6pt, belowskip=6pt,
+  breaklines=true,
+  upquote=true,
+}
+\lstnewenvironment{shell}{\lstset{language=bash,keywordstyle=\ttfamily}}{}
+\lstnewenvironment{out}{\lstset{language={},backgroundcolor=\color{white},
+  frame=l,framerule=0.6pt,rulecolor=\color{black!35},basicstyle=\ttfamily\footnotesize}}{}
+
+\newenvironment{caveat}[1]{\par\medskip\noindent\colorbox{notebg}{\parbox{\dimexpr\linewidth-2\fboxsep}{\small\textbf{#1.}\ }}\par\nopagebreak\begingroup\small}{\endgroup\par\medskip}
+
+\title{\bfseries F1R3Score\\[4pt]
+\large Building, deploying and using \texttt{f1r3score},\\
+the player for the score calculus}
+
+\author{F1R3FLY.io}
+
+\date{Documentation --- 27 September 2026\\[2pt]
+\normalsize Against \texttt{F1R3FLY-io/F1R3Score} commit \texttt{7416bc0},
+which implements revision~2 of \emph{The f1r3score Player} specification}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent \tool{} is a Rust command-line player and library for the score
+calculus of \emph{Scores as Processes}. A score is a process in a variant of
+the \rhoc{} calculus, and a performance is one run of it. The player reads a
+textual score, elaborates it to a closed core term, and executes a run. The
+run can be written out as a table, JSON, a replayable trace of records, a
+Standard MIDI File, or live MIDI.
+
+This guide covers three things. It shows how to build the workspace and run its
+conformance suite. It covers deploying the player as a binary, as a library, and
+as a reproducible archive of performances. And it shows how to use the player
+and write scores for it. Every command and every output quoted here was run
+against the commit named above, and the guide says where it could not verify
+something. Section~\ref{sec:limits} lists where the implementation departs from
+the specification or from its own documentation.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%==============================================================================
+\section{Introduction}\label{sec:intro}
+
+\subsection{What \tool{} is}
+
+The score calculus proposes a musical notation whose primary objects are
+exchange and preference rather than a single fixed performance: who listens to
+whom, which continuation a style favours, what lies easily under a player's
+hands. \tool{} makes that notation playable. It has three layers:
+\begin{itemize}
+\item a \emph{surface syntax}, a dialect of the f1r3\textbar@ng control-flow
+  sublanguage. It has decorated names, alphabet declarations and an
+  elaboration-time macro layer, with files ending in \ttx{.score};
+\item a \emph{standard library}, \ttx{std.score}, written entirely in that
+  syntax. It defines written notes, reflective voices, hockets, call and
+  response, keys, keyboards and chimeric instruments;
+\item an \emph{engine} that knows nothing of voices, keys or idioms. It
+  matches receipts and messages, weighs the candidates with graded
+  where-clauses, resolves contention by maximal matchings, keeps the record of
+  every communication, and reads notes off records.
+\end{itemize}
+
+\subsection{Sources}
+
+The guide draws on three sources in the \ttx{F1R3FLY-io} GitHub organisation:
+\begin{itemize}
+\item \ttx{F1R3Score}, the implementation. It contains \ttx{README.md},
+  \ttx{DESIGN.md} (decisions, deviations and verification status), the
+  examples, and a copy of the note in \ttx{docs/};
+\item \ttx{publications/f1r3score/score-calculus.tex}, the note \emph{Scores as
+  Processes}, which defines the calculus;
+\item \ttx{publications/f1r3score/f1r3score-player-spec.tex}, the player
+  specification (revision~2), together with \ttx{skeinsim.py}, the reference
+  simulator.
+\end{itemize}
+Section numbers of the form ``\S5.2 of the note'' refer to \emph{Scores as
+Processes}. Requirement and decision numbers refer to the specification.
+
+\subsection{How this guide was checked}
+
+The guide was written against commit \ttx{7416bc0} on Ubuntu~24.04 (x86\_64),
+with Rust~1.75.0 from the distribution packages. That is also the workspace's
+declared minimum, \ttx{rust-version = "1.75"}. On that machine:
+\begin{itemize}
+\item the release build succeeds with no warnings, and so does the build with
+  the \ttx{live} feature;
+\item \ttx{cargo test --release} passes all 70 tests;
+\item the cross-implementation differential against \ttx{skeinsim.py} agrees
+  on every scenario (run with 10 random scores);
+\item every command in Sections~\ref{sec:use} and~\ref{sec:examples} was run,
+  and the outputs shown are the actual outputs.
+\end{itemize}
+Two things could not be verified: the \ttx{wasm32} build of the core crates,
+and live MIDI on a real device (\S\ref{sec:limits}).
+
+%==============================================================================
+\section{Concepts in brief}\label{sec:concepts}
+
+This section gives the minimum of the calculus needed to read the rest of the
+guide. The note is the authority.
+
+\paragraph{Names carry notes.} A name is a triple $\nm{P}{\tau}{d}$: a quoted
+process $@P$ (its \emph{location}), a timbre $\tau$, and a datum $d$. The datum
+is either a pitch or a duration, and either decoration component may be left
+open, written \ttx{\_}. A name whose datum is a pitch is a \emph{channel}; a
+name whose datum is a duration is a \emph{co-channel}. The \emph{general name}
+$@P$ is $\nm{P}{\_}{\_}$.
+
+\paragraph{Every communication is a note.} A receipt
+\ttx{for (y <- x where psi) \{ P \}} and a message \ttx{x'!(Q, tau, d)}
+communicate when their subjects \emph{match}. That means three things hold:
+their locations are equivalent, their timbres meet in a concrete timbre, and
+their data are concrete and of opposite polarity (one a pitch, the other a
+duration). Each firing yields a \emph{record}, and the \emph{playback} function
+$\nu$ reads a note off it: the timbre, the pitch, and the duration. There are
+no silent steps.
+
+\paragraph{Null notes.} The rest \ttx{r} and the null duration \ttx{eps}
+(length $0$) let the calculus do bookkeeping, such as a server fetching its
+own code, as communications that are notes of zero length. These \emph{null
+notes} are recorded but excluded from the performance.
+
+\paragraph{Clauses weigh choices.} A receipt's where-clause evaluates to an
+exact non-negative rational on each candidate. A candidate is \emph{available}
+when its weight is positive. Available candidates that share a receipt or a
+message form a \emph{contention set}. A set is resolved by choosing a maximal
+matching with probability proportional to the product of its weights, and
+firing all of it. Clauses multiply, so style, register and the physicality of
+an instrument can be separate factors whose product is the voice's law.
+
+\paragraph{Time.} Every top-level process carries a stamp. A communication's
+onset is the later of its two stamps, and its continuation is stamped at the
+onset plus the note's length. Sets are resolved in onset order.
+
+\paragraph{Voices are reflective.} There is no recursion former. An unbounded
+voice is a server that keeps its own code on a code channel and re-sends it
+each time it is read (\S5.2 of the note). Definitions in the surface syntax are
+therefore macros with an acyclic call graph.
+
+\paragraph{Musicians and instruments.} A \emph{key} is a receipt holding a
+pitch, and it belongs to the instrument. A \emph{touch} is a message holding a
+duration, and it belongs to the player. A keyboard installs keys at key
+locations. A player sends touches, and \ttx{;} makes a player wait until its
+note has ended (Definition~9.3 of the note). A \emph{chimera} holds a key per
+timbre at one location, so a touch that leaves its timbre open is answered in
+whichever timbre the keys' clauses favour.
+
+%==============================================================================
+\section{Building}\label{sec:build}
+
+\subsection{Prerequisites}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l>{\raggedright\arraybackslash}X@{}}
+\toprule
+need & for \\
+\midrule
+Rust $\geq$ 1.75 and Cargo & everything. Any of rustup, the distribution
+  packages (Ubuntu 24.04: \ttx{apt install rustc cargo} gives 1.75.0), or
+  Homebrew will do. \\
+network access to crates.io & the first build only. The default build
+  depends only on \ttx{num-bigint}, \ttx{num-rational}, \ttx{num-traits} and
+  \ttx{num-integer}. \\
+ALSA headers and \ttx{pkg-config} (Linux) & the optional \ttx{live} feature
+  only: \ttx{apt install libasound2-dev pkg-config}. On macOS \ttx{midir} uses
+  CoreMIDI, and on Windows WinMM; neither needs extra packages. \\
+Python 3 and a checkout of \ttx{publications} & the cross-implementation
+  differential only (\S\ref{ssec:differential}). \\
+a \ttx{wasm32-unknown-unknown} standard library & building the core crates
+  for the browser (\S\ref{ssec:wasm}). \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Getting the source and building}
+
+\begin{shell}
+git clone https://github.com/F1R3FLY-io/F1R3Score.git
+cd F1R3Score
+cargo build --release
+./target/release/f1r3score --help
+\end{shell}
+
+\noindent A cold release build takes about a minute. The binary is
+\ttx{target/release/f1r3score}. It is self-contained: \ttx{std.score} is
+compiled in with \ttx{include\_str!}, so no data files need to accompany it.
+
+\subsection{Cargo features}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}lll>{\raggedright\arraybackslash}X@{}}
+\toprule
+feature & crate & default & effect \\
+\midrule
+\ttx{spigot} & \ttx{score-chance} & on & exact digit streams of
+  $\pi$, $e$, $\ln 2$, Liouville's constant, Champernowne's constant and the
+  Thue--Morse sequence, in any base: the \ttx{spigot:} chance sources \\
+\ttx{live} & \ttx{f1r3score}, \ttx{score-render} & off & live MIDI output
+  through \ttx{midir}: the \ttx{--live PORT} option and the \ttx{ports}
+  subcommand \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{shell}
+cargo build --release --features live -p f1r3score
+./target/release/f1r3score ports     # lists MIDI output ports
+\end{shell}
+
+\subsection{Build profiles}
+
+The workspace sets \ttx{opt-level = 1} for \ttx{dev} and \ttx{opt-level = 2}
+for \ttx{test}, because the conformance tests draw tens of thousands of notes.
+Use \ttx{--release} for anything musical. A 16-pitch $\times$ 5-duration voice
+plays at roughly 0.2--0.5\,ms per note in a release build.
+
+\subsection{Running the tests}
+
+\begin{shell}
+cargo test --release
+\end{shell}
+
+\noindent This runs 70 tests and takes about two minutes. Nearly all of that is
+\ttx{tests/law.rs} (about 60\,s) and \ttx{tests/suite.rs} (about 50\,s) in
+\ttx{score-conformance}. What they cover:
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l>{\raggedright\arraybackslash}X@{}}
+\toprule
+test file & what it checks \\
+\midrule
+\ttx{score-core} unit, \ttx{congruence.rs} & normal forms and matching; the
+  congruence and round-trip property tests over wildcards (10\textsuperscript{4}
+  random pairs against an independent decision procedure) \\
+\ttx{score-syntax/tests/syntax.rs} & parsing, elaboration, printing and
+  re-parsing, and diagnostics \\
+\ttx{score-chance} unit & PRNG determinism, spigot digits against known
+  expansions, interval decoding \\
+\ttx{suite.rs}, \ttx{law.rs}, \ttx{t12.rs} & the ported \ttx{skeinsim} suite
+  T0--T12 with the note's thresholds \\
+\ttx{instruments.rs} & T13 (4-hands piano), T14 (chimera), and the instrument
+  propositions \\
+\ttx{outputs.rs} & records and playback, \ttx{render} against \ttx{play}, the
+  MIDI golden files, replay, and detection of tampered choices \\
+\ttx{examples.rs} & every file in \ttx{examples/} elaborates and plays \\
+\ttx{portability.rs} & the five core crates contain no I/O \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent To run a single file: \ttx{cargo test --release -p score-conformance
+--test instruments}.
+
+\subsection{The cross-implementation differential}\label{ssec:differential}
+
+The differential checks that the Rust player and the Python reference simulator
+emit the same records at every resolution, null notes included. The player's
+traces drive \ttx{skeinsim.py}. It needs a checkout of \ttx{publications} and
+runs from the workspace root:
+
+\begin{shell}
+git clone https://github.com/F1R3FLY-io/publications.git ../publications
+sh crates/score-conformance/run_differential.sh ../publications/f1r3score 40
+\end{shell}
+
+\noindent The second argument is the number of random small scores (default
+40). The script ends with \ttx{differential: every scenario agrees}, or exits~1
+naming each scenario that differs. It is not part of \ttx{cargo test}, because
+it needs Python and the other repository.
+
+\subsection{Building for WebAssembly}\label{ssec:wasm}
+
+The five core crates (\ttx{score-core}, \ttx{score-logic}, \ttx{score-syntax},
+\ttx{score-chance}, \ttx{score-engine}) perform no I/O. That property is
+enforced by \ttx{portability.rs}, and it is what makes them candidates for
+\ttx{wasm32-unknown-unknown}:
+
+\begin{shell}
+rustup target add wasm32-unknown-unknown
+for c in score-core score-logic score-syntax score-chance score-engine; do
+  cargo build --release --target wasm32-unknown-unknown -p $c
+done
+\end{shell}
+
+\begin{caveat}{Not verified}
+Neither \ttx{DESIGN.md} nor this guide has seen that build succeed, because
+neither build machine had a wasm32 standard library. Ubuntu does not package
+one for its \ttx{rustc}, so use rustup.
+\end{caveat}
+
+\subsection{Build problems}
+
+\begin{description}[style=nextline,font=\normalfont\ttfamily\small]
+\item[error: package `\dots` cannot be built because it requires rustc 1.75]
+  The toolchain is too old; upgrade it.
+\item[failed to run custom build command for `alsa-sys`]
+  \ttx{--features live} on Linux without ALSA headers. Install
+  \ttx{libasound2-dev} and \ttx{pkg-config}.
+\item[could not compile `num-traits` \ldots{} (wasm32)] No standard library for
+  that target is installed (\S\ref{ssec:wasm}).
+\end{description}
+
+%==============================================================================
+\section{Deploying}\label{sec:deploy}
+
+\subsection{Installing the binary}
+
+\begin{shell}
+cargo install --path crates/f1r3score                 # into ~/.cargo/bin
+cargo install --path crates/f1r3score --features live # with live MIDI
+\end{shell}
+
+\noindent On Linux the default binary links only \ttx{libc}, \ttx{libm} and
+\ttx{libgcc\_s}, so it copies between glibc systems of the same or later
+vintage. It is about 15\,MB unstripped; \ttx{strip} reduces that
+considerably. A fully static build (\ttx{--target x86\_64-unknown-linux-musl})
+should work for the default feature set, since there are no C dependencies, but
+it was not tried. The \ttx{live} build links ALSA dynamically and needs
+\ttx{libasound2} at run time.
+
+\subsection{Pin the dependency graph}
+
+\ttx{Cargo.lock} is not committed. For a binary that promises bit-for-bit
+reproducible runs it should be, so that every build resolves the same
+\ttx{num-*} crates. The versions resolved for this guide were
+\ttx{num-bigint}~0.4.8, \ttx{num-rational}~0.4.2, \ttx{num-traits}~0.2.19,
+\ttx{num-integer}~0.1.47 and, with \ttx{live}, \ttx{midir}~0.9.1 and
+\ttx{alsa}~0.7.1. Until the lock file is committed, build with the lock file
+of a known-good checkout, or with \ttx{cargo build --locked} once it is.
+
+\subsection{Reproducibility and archiving performances}
+
+A run is determined by four things: the score, the chance sources, the
+scheduler, and the matching and collection modes. Every trace records all of
+them in its header, together with the score's SHA-256 structural digest and
+the player version. Two properties follow for archiving:
+\begin{itemize}
+\item \textbf{Replay.} \ttx{f1r3score replay TRACE --score SCORE} re-runs the
+  score from the trace's choices. It refuses a score whose digest differs from
+  the trace's, and exits~4 if any choice emits different notes. Archive the
+  score together with its trace.
+\item \textbf{Playback.} \ttx{f1r3score render TRACE} needs neither the score
+  nor the engine. The trace's records contain everything playback reads, so a
+  trace on its own is a durable performance.
+\end{itemize}
+Digests are structural. Reformatting a score, renaming bound variables, or
+changing stream labels (\S\ref{ssec:streams}) leaves the digest unchanged;
+changing its meaning does not.
+
+\subsection{Embedding the player as a library}
+
+The crates can be used directly from another Rust program, for example the
+F1R3Games back end or a browser front end over the core crates. This program
+was compiled and run against the workspace:
+
+\begin{lstlisting}[language=Rust]
+// Cargo.toml: score-syntax, score-engine, score-chance, score-render
+//             as path or git dependencies on the F1R3Score workspace
+use score_engine::{Config, Engine, Limits, Sources};
+use score_syntax::{load, NoFiles};
+
+fn main() -> Result<(), String> {
+    let src = std::fs::read_to_string("examples/hocket.score").map_err(|e| e.to_string())?;
+    // NoFiles allows only "import std"; implement score_syntax::Loader
+    // to resolve import "file.score" from wherever your scores live.
+    let s = load("hocket.score", &src, &mut NoFiles).map_err(|d| d.to_string())?;
+    let sources = Sources::new(score_chance::source("prng:42", 64)?);
+    let mut e = Engine::new(s.arena, s.clauses, s.alph, &s.initial, s.window,
+                            s.behavioural, Config::default(), sources)
+        .map_err(|e| e.to_string())?;
+    let limits = Limits { notes: Some(8), ..Default::default() };
+    let mut notes = Vec::new();
+    e.run(&limits, &mut |ev, _| notes.extend(ev.notes.iter().cloned()))
+        .map_err(|e| e.to_string())?;
+    let perf = score_render::performance_of(&notes, &e.alph);   // drops null notes
+    print!("{}", score_render::performance_table(&perf, &e.alph));
+    let midi = score_render::midi::write(&perf, &e.alph, 120);
+    std::fs::write("hocket.mid", &midi.bytes).map_err(|e| e.to_string())
+}
+\end{lstlisting}
+
+\noindent The pieces an embedder can use:
+\begin{itemize}
+\item \ttx{Sources::bind(label, source)} binds stream labels, as
+  \ttx{--stream} does.
+\item \ttx{Engine::step} advances one resolution at a time, for callers that
+  interleave playing with something else.
+\item A type implementing \ttx{score\_chance::Chance} can supply choices
+  directly. A graphical chooser would be one; the CLI's \ttx{Human} type is
+  the model to follow.
+\end{itemize}
+The engine's public types are those of revision~2 of the specification. They
+are not yet a stable API: the workspace version is \ttx{0.1.0}.
+
+\subsection{Live MIDI}
+
+Build with \ttx{--features live}, list the available ports, and pass a
+substring of the port name:
+
+\begin{shell}
+f1r3score ports
+f1r3score play examples/chimera.score --live "FluidSynth" --bpm 96
+\end{shell}
+
+\noindent On a Linux host without a hardware synthesiser, a software synth
+such as FluidSynth or TiMidity\texttt{++} provides an ALSA sequencer port.
+Containers and headless CI machines usually lack \ttx{/dev/snd/seq}; there
+\ttx{ports} fails with
+\ttx{MIDI support could not be initialized} (exit~3). Prefer \ttx{--midi} there.
+
+\begin{caveat}{Not verified}
+Live MIDI compiles and links, but it has not been tested on a MIDI device.
+Section~\ref{sec:limits} also describes how its timing departs from the
+specification.
+\end{caveat}
+
+\subsection{Continuous integration (proposed)}
+
+\ttx{portability.rs} and \ttx{DESIGN.md} both refer to a CI job at
+\ttx{.github/workflows/ci.yml}, but that file is not in the repository. The
+following workflow would cover what the design notes expect of CI: the tests,
+the wasm build and the differential. It has not been run.
+
+\begin{lstlisting}[language={}]
+# .github/workflows/ci.yml  -- proposed, untested
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75
+      - run: sudo apt-get install -y libasound2-dev pkg-config
+      - run: cargo build --release --features live
+      - run: cargo test --release
+  wasm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: wasm32-unknown-unknown }
+      - run: |
+          for c in score-core score-logic score-syntax score-chance score-engine; do
+            cargo build --release --target wasm32-unknown-unknown -p $c
+          done
+  differential:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with: { repository: F1R3FLY-io/publications, path: publications }
+      - uses: dtolnay/rust-toolchain@1.75
+      - run: sh crates/score-conformance/run_differential.sh publications/f1r3score 40
+\end{lstlisting}
+
+\noindent If \ttx{publications} is private, the second checkout needs a token
+with read access to it.
+
+\subsection{A container image (proposed)}
+
+For batch rendering, such as a service that turns scores or traces into MIDI
+files, a two-stage image keeps the runtime small. This Dockerfile is a
+template and has not been built:
+
+\begin{lstlisting}[language={}]
+FROM rust:1.75-slim AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release -p f1r3score
+
+FROM debian:bookworm-slim
+COPY --from=build /src/target/release/f1r3score /usr/local/bin/f1r3score
+WORKDIR /work
+ENTRYPOINT ["f1r3score"]
+# docker run --rm -v "$PWD:/work" f1r3score play piece.score --notes 64 --midi out.mid
+\end{lstlisting}
+
+%==============================================================================
+\section{Using the player}\label{sec:use}
+
+\subsection{Quick start}
+
+\begin{shell}
+B=target/release/f1r3score
+$B check  examples/twinkle.score
+$B play   examples/twinkle.score --midi twinkle.mid
+$B play   examples/country_voice.score --notes 32 \
+          --stream A=prng:3 --stream B=prng:4 --gc freshness \
+          --trace run.jsonl --midi run.mid
+$B replay run.jsonl --score examples/country_voice.score
+$B render run.jsonl --midi again.mid
+\end{shell}
+
+\noindent These commands, in order, check Twinkle, play it to a MIDI file,
+play 32 notes of two voices while writing a trace and MIDI, replay the trace
+against the score, and render the trace again without the score. The last
+\ttx{again.mid} is byte-identical to \ttx{run.mid}.
+
+\subsection{Commands}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{5.2cm}>{\raggedright\arraybackslash}X@{}}
+\toprule
+command & purpose \\
+\midrule
+\ttx{check SCORE} & Parse, elaborate and lint. Prints the digest, the regime
+  (\ttx{local}, or \ttx{window-behavioural (depth $d$)}; see
+  \S\ref{ssec:fragment}), and the number of terms and clauses. \\
+\ttx{expand SCORE} & Print the elaborated core term, with every definition
+  expanded. The output re-parses. \\
+\ttx{play SCORE [opts]} & Run the score once (\S\ref{ssec:playopts}). \\
+\ttx{replay TRACE --score SCORE} & Re-run from a trace's recorded choices and
+  check that each emits the recorded notes. Accepts \ttx{--midi}, \ttx{--bpm}
+  and \ttx{--format}; the scheduler, mode and collection come from the
+  trace. \\
+\ttx{render TRACE [opts]} & Playback only: read the notes off the trace's
+  records. Accepts \ttx{--midi}, \ttx{--bpm}, \ttx{--out}, \ttx{--format} and
+  \ttx{--include-null}. \\
+\ttx{machine import FILE --kind pitch|dur [--dual] --score SCORE [--name N]} &
+  Convert a machine exported by the instrument (indexed states) into a
+  \ttx{factor} line over the score's alphabet. \\
+\ttx{ports} & \ttx{live} builds only: list MIDI output ports. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent \ttx{check} on Twinkle prints:
+\begin{out}
+ok examples/twinkle.score
+digest  d5b61ae1d112ed6322f0981a125f2d82ce54cfea3277e89636bda081845af0a9
+regime  local
+terms   163   clauses 1
+\end{out}
+
+\subsection{Options for \ttx{play}}\label{ssec:playopts}
+
+\begin{center}
+\small
+\begin{longtable}{@{}l>{\raggedright\arraybackslash}p{9.6cm}@{}}
+\toprule
+option & meaning (default) \\
+\midrule
+\endhead
+\ttx{--chance SPEC} & default chance source for every stream not bound
+  otherwise (\ttx{prng:0}) \\
+\ttx{--stream LABEL=SPEC} & bind a stream label, a timbre, or
+  \ttx{LABEL.pitch}\,/\,\ttx{LABEL.dur} to a source; repeatable \\
+\ttx{--scheduler S} & order of simultaneously due sets: \ttx{canonical},
+  \ttx{random:SEED}, or \ttx{by-timbre:A,B,...} (\ttx{canonical}) \\
+\ttx{--mode max|one} & fire a maximal matching, or a single candidate as a
+  diagnostic (\ttx{max}) \\
+\ttx{--gc off|freshness} & collect inert record locations (\ttx{off}) \\
+\ttx{--notes N} & stop after N notes of positive length \\
+\ttx{--until T} & stop at musical time T in whole notes, e.g.\ \ttx{3/2} \\
+\ttx{--max-steps N} & stop after N resolutions \\
+\ttx{--max-alternatives N} & bound on maximal matchings per set (100000) \\
+\ttx{--unproductive N} & bound on consecutive null-note steps (100000) \\
+\ttx{--max-states N} & bound on behavioural window graphs (200000) \\
+\ttx{--kmax K} & interval-decoding digit bound per choice (64) \\
+\ttx{--trace FILE} & write a replayable JSONL trace \\
+\ttx{--format table|json} & performance on stdout (\ttx{table}) \\
+\ttx{--out FILE} & performance as JSON to FILE \\
+\ttx{--include-null} & include null notes in the printed performance \\
+\ttx{--midi FILE}, \ttx{--bpm N} & Standard MIDI File, at N quarter notes per
+  minute (120) \\
+\ttx{--live PORT} & live MIDI to the first port whose name contains PORT
+  (\ttx{live} builds) \\
+\ttx{--quiet} & print no performance \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\noindent With none of \ttx{--notes}, \ttx{--until} or \ttx{--max-steps}, the
+player warns that an unbounded score will play forever. Written scores such as
+Twinkle stop by themselves when nothing is left to communicate. Voices do not:
+always bound them.
+
+\subsection{Chance sources}\label{ssec:chance}
+
+Every automatic source is a stream of digits, and every choice is made by exact
+interval decoding. No floating point enters a weight or a choice, so the same
+sources yield the same run on every platform.
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l>{\raggedright\arraybackslash}X@{}}
+\toprule
+spec & source \\
+\midrule
+\ttx{prng:SEED} & SplitMix64 feeding xoshiro256**, fixed in the source so that
+  it cannot drift with a dependency \\
+\ttx{spigot:C/B} & digits of the fractional part of constant C in base B, with
+  C one of \ttx{pi}, \ttx{e}, \ttx{ln2}, \ttx{liouville}, \ttx{champernowne},
+  \ttx{thue-morse} \\
+\ttx{spigot:C/B@Q} & the same, starting at digit Q. Use this when the first
+  note is written rather than drawn. \\
+\ttx{human} & an interactive chooser on the terminal (\S\ref{ssec:human}) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent A set with a single alternative, which includes every null note,
+consumes no digits.
+
+\subsection{Stream labels}\label{ssec:streams}
+
+Choices are routed to sources through \emph{stream labels}. Independent voices
+should draw from independent streams: the note's product-law theorem holds
+surely only then.
+\begin{itemize}
+\item \ttx{Voice(...) \#A} labels every receipt in that application's expansion
+  \ttx{A}, and continuations inherit the label of the receipt that fired them.
+  Labels are metadata: they do not change the digest.
+\item An unlabelled receipt takes its subject's timbre as its label, or
+  \ttx{loc:<digest>} when the timbre is open. So \ttx{--stream vibes=human}
+  addresses every unlabelled receipt in timbre \ttx{vibes}.
+\item A contention set draws from the stream of its least receipt occurrence.
+  At a chimera that is the first-installed timbre's stream, so a chimera is
+  normally given one explicit label.
+\item \emph{Factor routing.} \ttx{--stream A.pitch=... --stream A.dur=...}
+  resolves a voice's pitch and duration by two independent draws (Lemma~6.4 of
+  the note). This happens only when both are bound, the set is a star, and each
+  top-level factor reads only one side. Otherwise the draw is joint. The trace
+  records which happened (\ttx{"routing":"factored"} or \ttx{"joint"}).
+\end{itemize}
+
+\subsection{Schedulers, modes and collection}
+
+\paragraph{Schedulers.} When several contention sets are due at the same
+onset, the scheduler orders them: \ttx{canonical} is a fixed order,
+\ttx{random:SEED} a seeded shuffle, and \ttx{by-timbre:A,B} resolves timbre A's
+sets first. Independent voices give the same performance under every
+scheduler. For example, Twinkle's \ttx{--out} files under
+\ttx{by-timbre:bass,piano} and \ttx{random:9} are byte-identical.
+
+\paragraph{Modes.} \ttx{max} is the semantics. \ttx{one} fires a single
+candidate per set and exists only for diagnosis (test T3).
+
+\paragraph{Collection.} Voices leave behind record locations whose alternatives
+went unplayed. They are inert, but they sit in the soup. \ttx{--gc freshness}
+removes record-shaped locations that no longer have an available candidate. It
+never changes a performance, and it guards its own soundness: spawning at a
+collected location is the run-time error \ttx{freshness-violated}. Use it for
+long runs of voices. It collects nothing on instruments.
+
+\subsection{Human choice}\label{ssec:human}
+
+\ttx{--chance human}, or \ttx{--stream LABEL=human} for one stream, stops at
+every set with more than one alternative. It lists the alternatives as timbre,
+pitch, duration and carried next datum (after \ttx{->}), with their normalised
+probabilities for guidance, and reads an index from standard input:
+
+\begin{out}
+step 1 at onset 0 (stream marimba):
+  [0] marimba E4 q -> C4   (0.100)
+  [1] marimba E4 q -> D4   (0.100)
+  ...
+  [9] marimba E4 e -> G4   (0.100)
+choose 0..9>
+\end{out}
+
+\noindent Only alternatives of positive weight are offered, so every trace a
+human produces is admissible. The chooser is step-wise, not real time. Binding
+\ttx{human} to one label and PRNGs to the rest gives a mixed performance, with
+a person improvising against algorithmic players. If input ends while a choice
+is pending, the run stops with exit~3, after printing what was played.
+
+\subsection{Outputs}
+
+\paragraph{Performance.} This is the multiset of timed notes of positive
+length, sorted by onset, timbre, pitch and duration, so that equal performances
+produce byte-identical files. Times and lengths are exact rationals in whole
+notes. The table form:
+
+\begin{out}
+     onset  timbre     pitch  dur     length
+         0  piano      C4     q          1/4
+         0  bass       C3     h          1/2
+       1/4  piano      C4     q          1/4
+\end{out}
+
+\noindent The JSON form (\ttx{--format json}, or \ttx{--out FILE}):
+\begin{out}
+{"score":"sha256:aa81...d0e8","end":"5/4","notes":[
+  {"onset":"0","timbre":"piano","pitch":"A2","dur":"h","len":"1/2"}, ... ]}
+\end{out}
+
+\paragraph{Trace.} JSON Lines, with format \ttx{f1r3score-trace/2}. The first
+line is a header:
+\begin{itemize}
+\item the player version, the score path and digest;
+\item the alphabets, with MIDI numbers and lengths, and the timbres;
+\item every source and stream binding, the scheduler, mode, locality regime,
+  collection mode, and \ttx{kmax}.
+\end{itemize}
+Then comes one line per resolution:
+\begin{out}
+{"step":1,"onset":"0","loc":"31933326af6fe475","set":2,"alts":2,"chosen":0,
+ "routing":"joint","digits":{"B":1},
+ "records":[{"onset":"0","loc":"31933326af6fe475","recv":["bass","C4"],
+             "send":["bass","h"],"payload":["8307dfa7ddbd16d9","bass","E4"]}]}
+\end{out}
+\noindent Each record gives the receipt's and the message's subject
+decorations and the payload decoration, with the payload process given by its
+digest. Notes are not stored; they are computed from records.
+
+\paragraph{MIDI.} \ttx{--midi} writes a format-1 Standard MIDI File, with a
+tempo track and one track per rendered timbre. Each track carries a program
+change from the timbre's \ttx{gm(N)} and the channel from its \ttx{on C}. A
+note's track is chosen by its own timbre, so a chimera's notes are routed note
+by note to whichever timbre won. Rests and notes in the reserved timbres
+produce no events. The division is the least number of ticks per quarter that
+makes every onset and length integral, if that is at most 32767. Otherwise it
+is 960, with rounding and a warning. \ttx{--bpm} is a rendering parameter only.
+
+\subsection{Exit codes and stop reasons}
+
+\begin{center}
+\small
+\begin{tabular}{@{}cl@{}}
+\toprule
+code & meaning \\
+\midrule
+0 & success \\
+1 & usage error (unknown option, missing value, missing file) \\
+2 & parse or elaboration error (and malformed traces for \ttx{render}) \\
+3 & run-time error: \ttx{unproductive}, \ttx{freshness-violated}, alternative
+  limit, state bound, I/O \\
+4 & replay mismatch: digest differs, a choice emits different notes, or
+  choices are left over \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent On success the player reports on standard error why it stopped:
+\ttx{Quiescent} (nothing left to communicate), \ttx{Notes}, \ttx{Until} or
+\ttx{Steps}. Examples are \ttx{Quiescent after 22 steps, 22 notes} and
+\ttx{Notes after 96 steps, 32 notes}. The performance goes to standard output
+and diagnostics to standard error, so \ttx{--format json > perf.json} is safe.
+
+%==============================================================================
+\section{Writing scores}\label{sec:write}
+
+\subsection{File structure}
+
+A score file is UTF-8, with comments \ttx{//} and \ttx{/* */}. It contains, in
+any order, an optional \ttx{score NAME}, imports, the three alphabet
+declarations, \ttx{pitchset}, \ttx{def} and \ttx{factor} items, and exactly one
+\ttx{play} item giving the initial configuration.
+
+\begin{lstlisting}[language=score]
+score First
+import std
+pitches   { r, C4, E4, G4, C5 }
+durations { q = 1/4, h = 1/2 }
+timbres   { piano = gm(0) on 1 }
+
+// a melody over a sustained two-note chord
+play line(base "Mel", piano) [ C4 q, E4 q, G4 q, C5 q ]
+   | line(base "Lo", piano)  [ C4 h, C4 h ]
+   | line(base "Hi", piano)  [ G4 h, E4 h ]
+\end{lstlisting}
+
+\noindent Parallel lines sound together; that is harmony as independence at
+composition. The run:
+\begin{out}
+     onset  timbre     pitch  dur     length
+         0  piano      C4     q          1/4
+         0  piano      C4     h          1/2
+         0  piano      G4     h          1/2
+       1/4  piano      E4     q          1/4
+       1/2  piano      C4     h          1/2
+       1/2  piano      E4     h          1/2
+       1/2  piano      G4     q          1/4
+       3/4  piano      C5     q          1/4
+f1r3score: Quiescent after 8 steps, 8 notes
+\end{out}
+
+\noindent \ttx{import std} brings in the standard library. \ttx{import
+"lib.score"} reads a file relative to the importing score; an imported file may
+contain only \ttx{def}, \ttx{factor}, \ttx{pitchset} and \ttx{import}.
+
+\subsection{Alphabets}
+
+\paragraph{Pitches.} \ttx{pitches \{ ... \}} lists the pitch alphabet \emph{in
+order}; that order defines \ttx{step(k)}. The rest \ttx{r} is required and is
+unordered. A pitch in scientific notation (\ttx{C4}, \ttx{F\#3}, \ttx{Bb2}) gets
+its MIDI number automatically, with C4 = 60. Any other identifier needs one:
+\ttx{deg7 = 67}. Enharmonics are distinct data. Two abbreviations are
+available:
+\begin{itemize}
+\item \ttx{scale KIND LO .. HI}, inclusive, where KIND is one of \ttx{major}
+  (\ttx{ionian}), \ttx{minor} (\ttx{aeolian}), \ttx{dorian}, \ttx{pentatonic}
+  (\ttx{major-pentatonic}), \ttx{minor-pentatonic}, \ttx{blues} or
+  \ttx{chromatic}. A flat low pitch (\ttx{Bb3}) names the scale with flats;
+\item \ttx{piano88}, which gives A0 to C8.
+\end{itemize}
+\ttx{pitchset NAME = \{...\}} declares a named subset for use in definitions.
+
+\paragraph{Durations.} Each duration is \ttx{NAME = RATIONAL} in whole notes:
+\ttx{q = 1/4}, \ttx{t = 1/6} for a triplet eighth, \ttx{dq = 3/8} for a dotted
+quarter. The null duration \ttx{eps = 0} is implicit and may not be
+redeclared. Pitch and duration names must be disjoint.
+
+\paragraph{Timbres.} \ttx{NAME = gm(PROGRAM) on CHANNEL}, with a General MIDI
+program from 0 to 127 and a channel from 1 to 16. The channel defaults to the
+timbre's position, modulo 16. \ttx{dead}, \ttx{ctl} and \ttx{\_} are reserved.
+
+\subsection{Processes}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l>{\raggedright\arraybackslash}X@{}}
+\toprule
+surface & meaning \\
+\midrule
+\ttx{0} & the inert process \\
+\ttx{<@P, tau, d>} & a name; \ttx{\_} for an open timbre or datum.
+  Compound quotes are parenthesised: \ttx{<@(P | Q), piano, q>} \\
+\ttx{@P} & the general name \ttx{<@P, \_, \_>} \\
+\ttx{x!(Q, tau, d)} & a message whose payload is the name \ttx{<@Q, tau, d>} \\
+\ttx{x!(Q)} & a message passing the general name \ttx{@Q} \\
+\ttx{for (y <- x where psi) \{ P \}} & a receipt; the clause is optional
+  (weight 1) \\
+\ttx{for (y1 <- x1 \& y2 <- x2 where psi) \{ P \}} & a join (chord receipt) \\
+\ttx{P | Q} & parallel composition \\
+\ttx{*x} & drop: run the process quoted by \ttx{x} \\
+\ttx{at 3/4 \{ P \}} & an entrance: stamp P at 3/4 (top level of \ttx{play}
+  only; the default is 0) \\
+\ttx{base "tag"} & a closed process used as a location; distinct tags give
+  inequivalent bases \\
+\ttx{keyloc(P, k)}, \ttx{keycode(P, k, tau)} & a key's location and its code
+  location on keyboard base P \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent In binder position \ttx{\_} is an unused binder. In decoration
+position it is the wildcard.
+
+\subsection{Definitions}
+
+Definitions are macros, expanded at elaboration time:
+\begin{lstlisting}[language=score]
+def N(L: proc, tau: timbre, p: pitch, d: dur; K: proc) =
+  for (_ <- <@L, tau, p>) { K } | <@L, tau, d>!(0)
+def P1 = base "P1"                                        // no parameters
+def touch(P: proc, k: pitch, d: dur): name = <@keyloc(P, k), _, d>   // returns a name
+\end{lstlisting}
+
+\begin{itemize}
+\item \textbf{Sorts.} The parameter sorts are \ttx{proc}, \ttx{name},
+  \ttx{timbre}, \ttx{pitch}, \ttx{dur}, \ttx{clause}, \ttx{string},
+  \ttx{pitchset}, lists \ttx{[S]}, tuples \ttx{(S1, S2)}, and \ttx{cont}.
+  A \ttx{cont} is a definition of arity one in a name, passed by name, with
+  \ttx{\_} marking the hole: \ttx{Req(\_, tau, BS)}.
+\item \textbf{No recursion.} The call graph must be acyclic. A recursive
+  definition is rejected with a pointer to \S5.2 of the note: unbounded
+  behaviour comes from reflection, as in \ttx{Voice}.
+\item \textbf{Comprehensions.} \ttx{par v in durations+, t in pitches \{ ...
+  \}} expands to a parallel composition. The generators are \ttx{pitches},
+  \ttx{pitches-r}, \ttx{durations}, \ttx{durations+} (positive durations),
+  declared pitch sets, literal sets, and lists, which may be destructured as
+  \ttx{par (tau, psi) in voices}.
+\item \textbf{Lines.} \ttx{line(L, tau) [ C4 q, E4 h, ... ]} is a
+  right-nested chain of written notes. \ttx{then K} replaces the final
+  \ttx{0}, for handing a phrase to a responder.
+\item \textbf{Synchronous output.} \ttx{a ; b ; 0} runs \ttx{b} when
+  \ttx{a}'s note has ended. A step is one touch or a parenthesised parallel
+  group. \ttx{;} binds more tightly than \ttx{|}, so \ttx{a ; 0 | c ; 0} is two
+  players. A \ttx{;} inside a message payload is an error. Inside definition
+  arguments \ttx{;} separates arguments, so parenthesise a sequence there.
+\item \textbf{Strings.} \ttx{++} concatenates strings, as in
+  \ttx{base tag ++ "/S"}.
+\end{itemize}
+
+\subsection{Clauses}\label{ssec:clauses}
+
+A clause is a \emph{graded} formula with values in the non-negative rationals.
+It is built from factors, which can be named with \ttx{factor NAME = ...}.
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l>{\raggedright\arraybackslash}X@{}}
+\toprule
+graded form & value \\
+\midrule
+\ttx{3/2}, \ttx{0.3}, \ttx{20} & a constant; decimals are exact (0.3 is 3/10) \\
+\ttx{[b]} & 1 if the crisp formula b holds, else 0 \\
+\ttx{psi * psi}, \ttx{psi + psi} & product (short-circuits on 0), sum \\
+\ttx{table KEY \{ k: w, ..., \_: w \}} & lookup by the listed key; \ttx{\_} is the
+  default and an absent default is 0. Keys are \ttx{dur}, \ttx{step} (ranges
+  such as \ttx{-1..1} allowed, but they must not overlap), \ttx{(pitch,
+  carry)}, \ttx{(prev, dur)}, or tuples of view functions \\
+\ttx{machine pitch \{ C4 -> E4 @ 2, ... \}} & a table keyed by (pitch, carry):
+  a weighted automaton on pitches \\
+\ttx{machine dur \{ q -> e @ 1, ... \}} & a table keyed by (prev, dur) \\
+\ttx{machine dur uniform}, \ttx{machine pitch uniform} & the complete uniform
+  machine \\
+\ttx{machine pitch dual \{...\}} & the dual (rhythm-leads) reading \\
+\ttx{machine pitch import "f.machine"} & a machine exported by the instrument \\
+\ttx{sum x in S \{ psi \}} & a sum expanded at elaboration \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent Crisp formulae have \ttx{true}, \ttx{false}, \ttx{!}, \ttx{\&\&},
+\ttx{||}, the comprehensions \ttx{any x in S \{ b \}} and \ttx{all x in S \{ b
+\}}, and these atoms:
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l>{\raggedright\arraybackslash}X@{}}
+\toprule
+atom & holds when \\
+\midrule
+\ttx{pitch(p)}, \ttx{dur(v)} & the candidate's note has this pitch, this
+  duration \\
+\ttx{carry(e)} & the datum carried to the next step is e; \ttx{carry(\_)} when
+  it is open \\
+\ttx{step(k)} & carried and current pitch are ordered and differ by k
+  positions in the pitch alphabet \\
+\ttx{held(t)}, \ttx{prev(u)} & the location's last record carries pitch t;
+  the previous duration was u \\
+\ttx{back(j, e)} & the record j levels into the past carries e \\
+\ttx{last[m1 .. mk]}, \ttx{call[...]} & the last k notes match; the same on
+  a handed-over call \\
+\ttx{at(s)}, \ttx{passes(s)} & the location's quote, or the passed process,
+  satisfies the spatial pattern s \\
+\ttx{pitch\#i}, \ttx{dur\#i}, \ttx{carry\#i} & per-pattern atoms of a chord
+  receipt \\
+\ttx{leads(b)} & the configuration after firing the candidate satisfies b
+  (\S\ref{ssec:fragment}) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent Spatial patterns are \ttx{<n, tau, d>!(s, tau, d)} for a message,
+\ttx{for(<n, tau, d>) s} for a receipt, \ttx{0}, \ttx{true}, \ttx{s | s},
+\ttx{!s}, \ttx{s \&\& s} and \ttx{@s}. In patterns, \ttx{?} matches any
+component, \emph{including} a wildcard, while \ttx{\_} matches only a
+wildcard. A location is never a wildcard, so write \ttx{<?, ...>} rather than
+\ttx{<\_, ...>}.
+
+\paragraph{Encourage or enforce.} Crisp factors enforce an idiom, and graded
+factors encourage one. Two examples from the conformance scores:
+\begin{lstlisting}[language=score]
+factor rule  = [!(any t in pitches { back(0, t) && back(1, t) && carry(t) })]  // no triple repeat
+factor boost = [back(1, C4) && back(0, D4) && carry(E4)] * 20 + 1             // favour C-D-E
+\end{lstlisting}
+
+\subsection{The checkable fragment}\label{ssec:fragment}
+
+A clause is admitted if it is in one of two classes.
+\begin{itemize}
+\item \textbf{Local.} No behavioural formula appears. The clause's value
+  depends only on the candidate.
+\item \textbf{Window-behavioural.} \ttx{leads(phi)} appears, where
+  \ttx{phi} is built from \ttx{true}, \ttx{false}, \ttx{live}, \ttx{!},
+  \ttx{\&\&}, \ttx{||}, \ttx{<g> phi}, \ttx{<> phi}, \ttx{nu X. phi} and
+  \ttx{X}. Every clause in the score must read the past to a bounded depth. The
+  player then decides \ttx{phi} exactly on a finite graph of configurations,
+  truncated to that depth.
+\end{itemize}
+\ttx{check} reports which regime a score uses. Graded behavioural modalities
+and graded fixed points are rejected with a reason. A bare modality must go
+under \ttx{leads(...)}. Exceeding \ttx{--max-states} is an error, never a
+truncation. The use for all this is viability, meaning enforcement that never
+paints a voice into a corner:
+\begin{lstlisting}[language=score]
+factor viable = [leads(nu X. <!(any t in pitches { back(0, t) && back(1, t) && carry(t) })> X)]
+play Voice(piano, style * rhythm * rule * viable, C4, q, "A") #A
+\end{lstlisting}
+
+\subsection{The standard library}
+
+\begin{center}
+\small
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{5.3cm}>{\raggedright\arraybackslash}p{9.4cm}@{}}
+\toprule
+definition & what it is \\
+\midrule
+\endhead
+\ttx{N(L, tau, p, d; K)}, \ttx{line} & a written note, and a written line \\
+\ttx{Rec}, \ttx{Fan(x, tau, over)}, \ttx{Seed} & the record, the fan of all
+  continuations (over a pitch set), and the virtual first record \\
+\ttx{Step}, \ttx{StepOver} & one step of a voice: every key offered, the
+  clause keeps the live one \\
+\ttx{Req}, \ttx{Refresh}, \ttx{Server}, \ttx{ServerTo} & the reflective
+  machinery: request, code refresh, server \\
+\ttx{Voice(tau, psi, p0, u0, tag)} & an unbounded voice with clause
+  \ttx{psi}, first pitch \ttx{p0}, previous duration \ttx{u0}. \ttx{VoiceOver}
+  takes a pitch set \\
+\ttx{DualVoice} & rhythm leads: the duration is chosen a note early and
+  carried \\
+\ttx{Hocket(tauA, psiA, tauB, psiB, p0, u0, tag)} & two players sharing one
+  line, note for note, possibly on different instruments \\
+\ttx{Call}, \ttx{Resp}, \ttx{Responder}, \ttx{RespAny}, \ttx{ResponderAny} &
+  call and response. The call hands over its whole history; \ttx{...Any}
+  answers in whatever timbre the caller chose \\
+\ttx{Key}, \ttx{Installed}, \ttx{KeyRefresh} & self-re-arming keys \\
+\ttx{Keyboard(P, tau, psi, over)} & every key of a pitch set on base \ttx{P} \\
+\ttx{Chimera(P, k, voices)}, \ttx{ChimeraKeyboard(P, over, voices)} & one key
+  location holding a key per \ttx{(timbre, clause)} \\
+\ttx{touch(P, k, d)} & a touch name with the timbre left to the instrument;
+  write \ttx{touch(P, A3, q)!(0)} \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\noindent Read \ttx{crates/score-syntax/std.score} for the definitions
+themselves. It is short and fully commented. \ttx{f1r3score expand} shows what
+any use of it elaborates to.
+
+%==============================================================================
+\section{Worked examples}\label{sec:examples}
+
+\subsection{A voice with a style}
+
+A voice draws each note from its clause. Here the clause is mostly stepwise
+motion, a small rhythm machine, and no rests:
+\begin{lstlisting}[language=score]
+score Walk
+import std
+pitches   { r, scale major C4 .. C5 }
+durations { e = 1/8, q = 1/4, h = 1/2 }
+timbres   { piano = gm(0) on 1 }
+
+factor steps  = table step { -1..1: 4, -2: 1, 2: 1, _: 0 }   // mostly stepwise
+factor rhythm = machine dur { q -> q @ 3, q -> e @ 1, e -> e @ 1, e -> q @ 2,
+                              q -> h @ 1, h -> q @ 1 }
+factor norest = [!carry(r)]
+
+play Voice(piano, steps * rhythm * norest, C4, q, "W") #W
+\end{lstlisting}
+\begin{shell}
+f1r3score play walk.score --notes 12 --stream W=prng:5 --gc freshness --midi walk.mid
+\end{shell}
+\begin{out}
+     onset  timbre     pitch  dur     length
+         0  piano      C4     q          1/4
+       1/4  piano      C4     q          1/4
+       1/2  piano      D4     q          1/4
+       3/4  piano      E4     h          1/2
+       5/4  piano      D4     q          1/4
+       ...
+f1r3score: Notes after 36 steps, 12 notes
+\end{out}
+\noindent Each note takes three resolutions: one note and two null notes of
+the reflective server. Change the seed to get another performance of the same
+score. Change one factor to move the style to a new instrument.
+
+\subsection{The shipped examples}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{4.4cm}@{}}
+\toprule
+file & what it shows & try \\
+\midrule
+\ttx{twinkle.score} & written lines and harmony by independence; golden score
+  of T12 & \ttx{play ... --midi t.mid} \\
+\ttx{country\_voice.score} & a product of experts, style $\times$
+  physicality $\times$ rhythm, against a walking bass & \ttx{--notes 32
+  --stream A=prng:3 --stream B=prng:4 --gc freshness} \\
+\ttx{hocket.score} & two players sharing a line, marimba and vibes
+  alternating & \ttx{--notes 16} \\
+\ttx{call\_response.score} & a flute calls and a cello answers a fifth up
+  after reading the call & \ttx{--notes 8} \\
+\ttx{four\_hands.score} & two keyboards and two players with synchronous
+  output; golden score of T13 & \ttx{--include-null} shows the 16 null notes \\
+\ttx{chimera.score} & detached eighths sound on vibes and sustained halves on
+  strings; the instrument chooses its timbre & \ttx{--midi c.mid} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent Call and response, for instance, plays:
+\begin{out}
+         0  flute      C4     q          1/4
+       1/4  flute      E4     q          1/4
+       1/2  flute      G4     q          1/4
+       3/4  cello      G4     h          1/2
+       5/4  cello      D5     h          1/2
+       7/4  cello      C5     h          1/2
+\end{out}
+
+\subsection{Transcendental numbers as players}
+
+The instrument's embedding of $\pi$ and $e$ is itself a score. Route the
+voice's pitch factor to the hexadecimal digits of $\pi$ and its duration factor
+to the base-5 digits of $e$:
+\begin{shell}
+f1r3score play crates/score-conformance/scores/t4_embedding.score --notes 8 \
+  --gc freshness --stream A.pitch=spigot:pi/16@1 --stream A.dur=spigot:e/5
+\end{shell}
+\noindent The pitches after the written D4 are E4, D\#4, r, F\#4, A\#4, G\#4,
+G\#4. On the 16-state alphabet C4 \dots{} D5, r, those are the hex digits 4,
+3, F, 6, A, 8, 8 of $\pi$. \ttx{@1} skips the first digit, because the first
+pitch is written, not drawn.
+
+\subsection{Importing a drawn machine}
+
+A weighted automaton drawn in the F1R3Skein instrument is exported with indexed
+states:
+\begin{lstlisting}[language={}]
+machine 3 start 1 { 0 -> 1 @ 1, 1 -> 1 @ 3, 1 -> 2 @ 2, 2 -> 1 @ 2, 2 -> 2 @ 1 }
+\end{lstlisting}
+\begin{shell}
+f1r3score machine import dur.machine --kind dur --score examples/country_voice.score --name groove
+\end{shell}
+\begin{out}
+factor groove = machine dur { h -> q @ 1, q -> q @ 3, q -> e @ 2, e -> q @ 2, e -> e @ 1 }
+\end{out}
+\noindent The states map onto the score's alphabet by position. A duration
+machine uses the positive durations in declaration order. A pitch machine uses
+the ordered pitches followed by the rest. The state count must equal the
+alphabet size.
+
+%==============================================================================
+\section{Troubleshooting}\label{sec:trouble}
+
+\begin{description}[style=nextline,font=\normalfont\ttfamily\small]
+\item[error: `D4` is not a declared pitch or duration]
+  Every datum and timbre must be declared. Exit 2.
+\item[error: recursive definition: `A` refers to `A` \dots]
+  Use reflection (a \ttx{Server} with its code on a code channel), as
+  \ttx{Voice} does.
+\item[error: `dead` is the reserved dead timbre \dots]
+  Only \ttx{base}, \ttx{keyloc} and \ttx{keycode} may produce it.
+\item[error: a behavioural modality is a formula of the configuration: write it under `leads(...)`]
+  A bare \ttx{<>} in a clause.
+\item[error: a table key is listed twice]
+  Overlapping ranges in a \ttx{step} table, such as \ttx{-1..1} and
+  \ttx{-2..2}. List the outer values separately.
+\item[error: expected a process, found `1`]
+  Only \ttx{0} is a process literal; use \ttx{base "..."} for a fresh
+  location.
+\item[warning: a subject has datum `\_` \dots{} can never communicate]
+  A name with no polarity. The score still runs, but that receipt or message
+  is dead.
+\item[warning: a top-level receipt and message share a location but their subjects never match]
+  Same polarity, or timbres that cannot meet (both open, or different).
+\item[Quiescent after 8 steps, 2 notes (with a larger --notes)]
+  The score deadlocked: every candidate has weight 0. A crisp rule has
+  painted a voice into a corner. Add a viability factor
+  (\S\ref{ssec:fragment}), or soften the rule into a graded factor. Compare
+  \ttx{viable\_absent.score} with \ttx{viable.score} in the conformance
+  scores.
+\item[error: unproductive]
+  Too many consecutive null-note steps: a reflective loop that never plays.
+  Exit 3.
+\item[the run never ends]
+  A voice is unbounded. Give \ttx{--notes}, \ttx{--until} or
+  \ttx{--max-steps}.
+\item[memory grows over a very long run]
+  Terms are hash-consed and never freed; each note interns about 80 fan
+  records. \ttx{--gc freshness} trims the soup but not the arena. Split very
+  long performances.
+\item[replay-mismatch: step N: the replayed choice emitted different notes]
+  The trace was edited, or the score changed in a way that keeps the digest
+  but not the choices. That should not happen, so report it with both files.
+\item[digest mismatch: the trace is of score \dots]
+  Replay against the score the trace was made from.
+\end{description}
+
+%==============================================================================
+\section{Known limitations and discrepancies}\label{sec:limits}
+
+The following were found while preparing this guide, or are recorded in
+\ttx{DESIGN.md}. None affects the correctness of offline runs.
+
+\begin{enumerate}
+\item \textbf{No CI workflow in the repository.} \ttx{portability.rs} and
+  \ttx{DESIGN.md} refer to \ttx{.github/workflows/ci.yml}, which does not
+  exist. As a result, the wasm32 build and the differential are not run
+  automatically. A proposed workflow is in \S\ref{sec:deploy}.
+\item \textbf{wasm32 is unverified.} The core crates are I/O-free by test,
+  but their wasm build has not been seen to succeed.
+\item \textbf{\ttx{Cargo.lock} is not committed}, which weakens the
+  reproducibility the design otherwise guarantees.
+\item \textbf{Live MIDI timing differs from the specification.} The
+  specification has a playback thread fed through a bounded channel, with the
+  engine running ahead by a look-ahead and never waiting on the clock. The
+  implementation instead sleeps inside the engine's callback until each
+  note-on is due, so the engine waits on the clock. Live MIDI has not been
+  tested on a device.
+\item \textbf{\ttx{--live} requires PORT}, matched as a substring, whereas the
+  specification makes it optional. The \ttx{ports} subcommand exists only in
+  \ttx{live} builds and is not listed in the usage text.
+\item \textbf{Lints print as \ttx{error: warning: \dots}}, even though
+  elaboration succeeds and the exit code is 0.
+\item \textbf{A stale \ttx{replay:FILE} hint.} The error for an unknown chance
+  source suggests \ttx{replay:FILE}, which is not implemented as a source.
+  Replay is the \ttx{replay} subcommand.
+\item \textbf{Single-alternative events are not checked on replay.} Their
+  \ttx{chosen} field is not validated, since nothing was chosen. Tampering
+  with a real choice is detected.
+\item \textbf{Command-line forms differ from the specification.} The
+  specification writes \ttx{replay piece.score run.jsonl} and
+  \ttx{machine import FILE --pitches SCORE}. The binary takes \ttx{replay TRACE
+  --score SCORE} and \ttx{machine import FILE --kind pitch|dur --score SCORE}.
+  This guide follows the binary.
+\item \textbf{Deadlock looks like a normal end.} It ends as \ttx{Quiescent}
+  with exit 0. Compare the note count with \ttx{--notes} to detect it.
+\item \textbf{Scope.} The following are outside this version:
+  \begin{itemize}
+  \item graded behavioural modalities and graded fixed points;
+  \item atoms reading the note's timbre (reserved for orchestration);
+  \item a real-time human chooser;
+  \item tempo as a graded dimension.
+  \end{itemize}
+\item \textbf{\ttx{spigot\_stream} is not used.} The upstream crate in
+  F1R3Games had defects outside base 10 (\ttx{DESIGN.md}), so
+  \ttx{score-chance} computes its own digits.
+\end{enumerate}
+
+%==============================================================================
+\appendix
+\section{Repository layout}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l>{\raggedright\arraybackslash}X@{}}
+\toprule
+path & contents \\
+\midrule
+\ttx{crates/score-core} & exact rationals, alphabets, decorations with
+  wildcards, hash-consed terms in congruence normal form, substitution,
+  matching, records and $\nu$, bases and key locations, SHA-256 digests \\
+\ttx{crates/score-logic} & spatial, crisp and graded formulae, tables, the
+  checkable fragment, candidate views, evaluation \\
+\ttx{crates/score-syntax} & lexer, parser, elaborator, printer, \ttx{std.score} \\
+\ttx{crates/score-chance} & PRNG, spigot digits, exact interval decoding \\
+\ttx{crates/score-engine} & soup, candidates, contention sets, maximal
+  matchings, time, schedulers, collection, factor routing, the behavioural
+  explorer \\
+\ttx{crates/score-render} & playback, performance and trace JSON, trace
+  parsing, MIDI writer, live MIDI \\
+\ttx{crates/f1r3score} & the command-line player \\
+\ttx{crates/score-conformance} & tests T0--T14, the scores and golden MIDI
+  files they use, \ttx{gen\_scores.py}, \ttx{differential.py},
+  \ttx{run\_differential.sh} \\
+\ttx{examples/} & six example scores \\
+\ttx{DESIGN.md} & decisions, deviations, conformance results, what is and is
+  not verified \\
+\ttx{docs/} & \emph{Scores as Processes} (PDF) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent The five core crates depend only on the \ttx{num-*} crates and
+perform no I/O. The licence is Apache~2.0.
+
+\section{Conformance tests}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l>{\raggedright\arraybackslash}X@{}}
+\toprule
+test & claim checked \\
+\midrule
+T0 & inertness of unplayed alternatives \\
+T1 & a voice's law is the normalised product of its factors (20{,}000 notes) \\
+T2 & independent voices: interleaving invariance, product law \\
+T3 & a note cannot be fitted from both sides; \ttx{max} vs \ttx{one} mode \\
+T4 & the $\pi$/$e$ embedding, by factor routing \\
+T5 & the dual (rhythm-leads) voice \\
+T6 & simultaneity by contention \\
+T7 & style $\times$ physicality \\
+T8 & motifs: forbid (crisp), encourage (graded) \\
+T9 & tables equal their formulae \\
+T10, T11 & reflective voice equals unrolled voice; inertness under reflection \\
+T12 & Twinkle: 22 notes ending at 4, under every scheduler \\
+T13 & 4-hands piano: Example 9.5 exactly; a third player gives exactly two
+  performances \\
+T14 & chimera: vibes share 0.9 / 0.5 / 0.1 by articulation; 1 when named \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent Measured values for each test are in \ttx{DESIGN.md}.
+
+\end{document}
